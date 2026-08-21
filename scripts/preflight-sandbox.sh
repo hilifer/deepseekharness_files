@@ -131,7 +131,21 @@ P=$(g PROCS)
                        || bad "PID 命名空间未隔离" "$P 个进程可见"
 
 echo
-echo "=== 4. 网络面（沙箱与宿主共享网络命名空间，这里是已知残留风险） ==="
+echo "=== 4. 网络面 ==="
+if [ "${DSH_NETNS:-0}" = "1" ]; then
+  info "网络隔离模式" "已启用（每实例独立 netns，入站走 unix socket）"
+  if command -v pasta >/dev/null 2>&1 && command -v socat >/dev/null 2>&1; then
+    ok "pasta 与 socat 就位"
+  else
+    bad "pasta 或 socat 缺失" "sudo apt-get install -y passt socat"
+  fi
+  LEFTOVER=$(ss -ltn 2>/dev/null | grep -cE ':(3080|131[0-9][0-9])' || true)
+  [ "${LEFTOVER:-0}" = "0" ] && ok "宿主回环上无 dsh 端口" "实例间无法互连" \
+                             || bad "宿主回环上仍有 $LEFTOVER 个 dsh 端口" "实例间可互连"
+else
+  info "网络隔离模式" "未启用 —— 沙箱与宿主共享网络命名空间"
+  info "" "开启方法见 OPS.md；下面几项是当前形态下的实测结果"
+fi
 FB=$(g FBAPI)
 case "$FB" in
   401|403) ok "FileBrowser API 伪造 admin" "被拒 (HTTP $FB) —— 密钥头已生效" ;;

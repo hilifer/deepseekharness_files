@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -34,7 +35,21 @@ def _bwrap_works() -> bool:
         return False
 
 
+def _pasta_works() -> bool:
+    """pasta 装了不等于能用：嵌套容器里它会在 uid 映射那步失败。
+    和 bwrap 一样必须真跑一次，否则测试会挂在那里空等。"""
+    if not (shutil.which("pasta") and shutil.which("socat")):
+        return False
+    try:
+        return subprocess.run(
+            ["pasta", "--config-net", "--no-map-gw", "-t", "none", "-u", "none", "--", "true"],
+            capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 BWRAP_OK = _bwrap_works()
+NETNS_OK = BWRAP_OK and _pasta_works()
 
 # 沙箱内执行的探针：逐项试探，输出 KEY=VALUE
 PROBE = r'''
@@ -204,6 +219,128 @@ class SandboxIsolationTest(unittest.TestCase):
     def test_trusted_host_passed_through(self):
         self.assertIn("--trusted-host", self.out["ARGS"])
         self.assertIn("web --port 13101", self.out["ARGS"])
+
+
+@unittest.skipUnless(NETNS_OK, "需要 pasta(passt) 与 socat")
+class NetnsIsolationTest(unittest.TestCase):
+    """DSH_NETNS=1：每实例独立网络命名空间，入站走 unix socket。
+
+    验的是：宿主回环上不再留下 dsh 端口，因而员工之间无法互连实例；
+    同时 nginx 仍能经 unix socket 连到实例，沙箱内仍能出网。
+    用的是真实的 dsh-runtime/dsh-sandbox.sh，不是实验用的临时脚本。
+    """
+
+    PORT = 13411
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name) / "home"
+        cls.root = root
+        (root / "node/bin").mkdir(parents=True)
+        (root / "dsh-runtime").mkdir(parents=True)
+        for sub in ("A", "B"):
+            (root / f"dsh-users/{sub}").mkdir(parents=True)
+            (root / f"ws/{sub}").mkdir(parents=True)
+        for name in ("dsh-sandbox.sh", "dsh-netns-entry.sh"):
+            shutil.copy(REPO / "dsh-runtime" / name, root / "dsh-runtime" / name)
+            (root / "dsh-runtime" / name).chmod(0o755)
+        shutil.copy("/bin/bash", root / "node/bin/node")
+        # 冒充 dsh：在本 netns 的 --port 上起一个 HTTP 服务
+        fake = root / "node/bin/dsh"
+        fake.write_text(
+            'port=""\n'
+            'while [ $# -gt 0 ]; do [ "$1" = "--port" ] && port=$2; shift; done\n'
+            'exec python3 -c "\n'
+            'import http.server, os, sys\n'
+            'who = os.environ.get(\'WHOAMI\', \'?\')\n'
+            'class H(http.server.BaseHTTPRequestHandler):\n'
+            '    def do_GET(s):\n'
+            '        s.send_response(200); s.end_headers(); s.wfile.write((\'dsh-\'+who).encode())\n'
+            '    def log_message(*a): pass\n'
+            'http.server.HTTPServer((\'127.0.0.1\', int(sys.argv[1])), H).serve_forever()" "$port"\n',
+            encoding="utf-8")
+        fake.chmod(0o755)
+
+        cls.procs = []
+        for who in ("B", "A"):
+            env = {
+                **os.environ,
+                "DSH_ROOT": str(root), "DSH_NETNS": "1",
+                "DSH_NODE_ROOT": str(root / "node"),
+                "DSH_NODE_BIN": str(root / "node/bin/node"),
+                "DSH_BIN": str(root / "node/bin/dsh"),
+                "DSH_SANDBOX_PASSENV": "WHOAMI", "WHOAMI": who,
+            }
+            cls.procs.append(subprocess.Popen(
+                [str(root / "dsh-runtime/dsh-sandbox.sh"), who, str(cls.PORT),
+                 str(root / f"dsh-users/{who}"), str(root / f"ws/{who}")],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True))
+        cls.sock_b = root / "dsh-sockets/B/dsh.sock"
+        deadline = time.time() + 25
+        while time.time() < deadline and not cls.sock_b.exists():
+            time.sleep(0.5)
+        if not cls.sock_b.exists():
+            for proc in cls.procs:
+                proc.terminate()
+            raise AssertionError(
+                "netns 模式下实例未在 25 秒内建立 socket: " + str(cls.sock_b))
+
+    @classmethod
+    def tearDownClass(cls):
+        for p in cls.procs:
+            p.terminate()
+        cls._tmp.cleanup()
+
+    @staticmethod
+    def _curl(args: list[str]) -> tuple[str, int]:
+        r = subprocess.run(["curl", "-s", "--max-time", "5", *args],
+                           capture_output=True, text=True)
+        return r.stdout.strip(), r.returncode
+
+    def test_socket_created(self):
+        self.assertTrue(self.sock_b.exists(), "实例应建立 unix socket 供 nginx 连接")
+
+    def test_host_reaches_instance_via_socket(self):
+        out, _ = self._curl(["--unix-socket", str(self.sock_b), "http://x/"])
+        self.assertEqual(out, "dsh-B", "nginx 必须能经 unix socket 连到实例")
+
+    def test_no_port_on_host_loopback(self):
+        """宿主回环上不留端口，是实例间互不可连的根本原因。"""
+        _, rc = self._curl(["-o", "/dev/null", f"http://127.0.0.1:{self.PORT}/"])
+        self.assertEqual(rc, 7, f"期望 curl 退出码 7（拒绝连接），实际 {rc}")
+        listening = subprocess.run(["ss", "-ltn"], capture_output=True, text=True).stdout
+        self.assertNotIn(f":{self.PORT}", listening, "宿主不应有该端口的监听")
+
+    def test_peer_cannot_reach_other_instance(self):
+        """员工 A 的沙箱里去连员工 B 的实例——三条路都应不通。"""
+        # 用位置参数传 URL，避免 f-string 与多层引号互相打架
+        probe = ('c() { curl -s --max-time 4 -o /dev/null -w "%{http_code}" "$@" 2>/dev/null; }; '
+                 'echo LOOP=$(c "$1"); echo SOCK=$(c --unix-socket "$2" http://x/)')
+        r = subprocess.run(
+            ["pasta", "--config-net", "--no-map-gw", "-t", "none", "-u", "none", "--",
+             "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+             "--tmpfs", "/tmp", "--tmpfs", str(self.root / "dsh-sockets"),
+             "--unshare-user", "--share-net", "--", "bash", "-c", probe,
+             "_", f"http://127.0.0.1:{self.PORT}/", str(self.sock_b)],
+            capture_output=True, text=True, timeout=60)
+        out = r.stdout
+        self.assertIn("LOOP=000", out, f"A 不应连到 B 的端口: {out!r}")
+        self.assertIn("SOCK=000", out, f"A 不应连到 B 的 socket: {out!r}")
+
+    def test_outbound_still_works(self):
+        """dsh 要调模型 API，隔离网络后出网必须仍然可用。"""
+        resolv = self.root / "dsh-sockets/B/resolv.conf"
+        self.assertTrue(resolv.exists(), "netns 模式应生成指向 pasta DNS 转发器的 resolv.conf")
+        self.assertIn("nameserver", resolv.read_text(encoding="utf-8"))
+        r = subprocess.run(
+            ["pasta", "--config-net", "--no-map-gw", "--dns-forward", "10.0.2.3", "--",
+             "bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+             "--ro-bind", str(resolv), "/etc/resolv.conf", "--unshare-user", "--share-net", "--",
+             "bash", "-c", "getent hosts github.com >/dev/null 2>&1 && echo DNS_OK"],
+            capture_output=True, text=True, timeout=60)
+        self.assertIn("DNS_OK", r.stdout, f"沙箱内 DNS 应可用: {r.stdout!r} {r.stderr[-200:]!r}")
 
 
 class SandboxFailClosedTest(unittest.TestCase):

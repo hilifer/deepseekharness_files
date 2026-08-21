@@ -20,12 +20,12 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 安装 bubblewrap
-        # 隔离测试要真跑沙箱。GitHub runner 是虚机，非特权 user namespace 可用。
+      - name: 安装 bubblewrap / passt / socat
+        # 隔离测试要真跑沙箱。passt+socat 供 DSH_NETNS=1 的网络隔离用例使用。
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y bubblewrap
-          bwrap --version
+          sudo apt-get install -y bubblewrap passt socat
+          bwrap --version; pasta --version 2>&1 | head -1
 
       - name: 放开非特权 user namespace 限制
         # Ubuntu 24.04 起 AppArmor 默认拦截非特权 userns，bwrap 会报
@@ -55,7 +55,9 @@ jobs:
             echo "$OUT"; echo "::error::沙箱隔离测试失败"; exit 1; }
           echo "$OUT"
           if echo "$OUT" | grep -q "skipped"; then
-            echo "::error::沙箱隔离测试被跳过了（skipUnless 生效），CI 绿得没有意义"; exit 1
+            echo "::error::沙箱隔离测试被跳过了（skipUnless 生效），CI 绿得没有意义。"
+            echo "::error::文件系统隔离需要 bubblewrap；网络隔离用例还需要 passt 与 socat。"
+            exit 1
           fi
           echo "$OUT" | grep -qE "Ran ([0-9]+) tests" || { echo "::error::没跑到测试"; exit 1; }
 
@@ -67,8 +69,8 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
 
-      - name: 安装 bubblewrap
-        run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+      - name: 安装 bubblewrap / passt / socat
+        run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap passt socat
 
       - name: 放开非特权 user namespace 限制
         # Ubuntu 24.04 起 AppArmor 默认拦截非特权 userns，bwrap 会报

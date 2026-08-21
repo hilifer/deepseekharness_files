@@ -265,6 +265,9 @@ class Config:
     fb_proxy_header: str = "X-Forwarded-User"
     authelia_health: str = "http://127.0.0.1:19091/api/health"
     trusted_hosts: str = "218.17.143.249:8099"
+    # 网络隔离模式：每实例独立网络命名空间，入站走 unix socket，
+    # 宿主回环上不再留 dsh 端口，员工之间无法互连实例。详见 dsh-sandbox.sh。
+    netns: bool = False
 
     @property
     def files_root(self) -> Path: return self.root / "dsh-files"
@@ -292,6 +295,16 @@ class Config:
     def sandbox_sh(self) -> Path: return self.root / "dsh-runtime" / "dsh-sandbox.sh"
     @property
     def shared_profiles(self) -> Path: return self.root / ".local" / "share" / "dsh" / "profiles"
+    @property
+    def socket_dir(self) -> Path: return self.root / "dsh-sockets"
+
+    def upstream_for(self, username: str, port: int) -> str:
+        """该用户在 nginx map 里的 upstream 值。"""
+        if self.netns:
+            # nginx 支持 proxy_pass http://$var，变量展开成 unix: 形式；
+            # 已实测可行（含与 TCP 形式在同一张 map 里混用）。
+            return f"unix:{self.socket_dir / username / 'dsh.sock'}:"
+        return f"127.0.0.1:{port}"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -302,6 +315,7 @@ class Config:
             fb_proxy_header=(os.environ.get("FB_PROXY_HEADER")
                              or read_fb_proxy_header(root)),
             trusted_hosts=os.environ.get("DSH_TRUSTED_HOSTS", "218.17.143.249:8099"),
+            netns=os.environ.get("DSH_NETNS", "0") == "1",
         )
 
 
@@ -471,11 +485,13 @@ class Engine:
         match = self._MAP_RE.search(text)
         if not match:
             raise ProvisionError("nginx.conf 中未找到 `map $user $dsh_upstream` 块")
+        # default 始终保持 TCP 黑洞：未匹配的用户要的是 403，
+        # 而不是 unix socket 不存在导致的 502。
         lines = ["\n        default     127.0.0.1:13100;"]
         if "admin" not in routes:
-            lines.append('\n        "admin"     127.0.0.1:3080;')
+            lines.append(f'\n        "admin"     {self.cfg.upstream_for("admin", 3080)};')
         for username in sorted(routes):
-            lines.append(f'\n        "{username}"  127.0.0.1:{routes[username]};')
+            lines.append(f'\n        "{username}"  {self.cfg.upstream_for(username, routes[username])};')
         new_text = text[:match.start(2)] + "".join(lines) + text[match.end(2):]
         _atomic_write(path, new_text)
 
@@ -515,7 +531,9 @@ class Engine:
         self.run.spawn(
             [str(self.cfg.sandbox_sh), username, str(port), str(dsh_home), str(workspace)],
             logfile=dsh_home / "dsh.log",
-            env={"DSH_ROOT": str(self.cfg.root), "DSH_TRUSTED_HOSTS": self.cfg.trusted_hosts},
+            env={"DSH_ROOT": str(self.cfg.root),
+                 "DSH_TRUSTED_HOSTS": self.cfg.trusted_hosts,
+                 "DSH_NETNS": "1" if self.cfg.netns else "0"},
         )
 
     def dsh_restart(self, username: str, rec: dict) -> None:
@@ -524,7 +542,9 @@ class Engine:
         self.dsh_start(username, rec)
 
     def sandbox_available(self) -> tuple[bool, str]:
-        res = self.run.run([str(self.cfg.sandbox_sh), "--check"], timeout=30)
+        res = self.run.run([str(self.cfg.sandbox_sh), "--check"], timeout=30,
+                           env={"DSH_NETNS": "1" if self.cfg.netns else "0",
+                                "DSH_ROOT": str(self.cfg.root)})
         return res.returncode == 0, (res.stdout or res.stderr).strip()
 
     # ---------------- DSH_HOME 播种 ----------------

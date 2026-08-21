@@ -314,6 +314,33 @@ class TestCreate(TempCase):
             self.engine.create_user("zhangsan", "张三", "研发部", "员工")
 
 
+class TestNetnsMode(TempCase):
+    """网络隔离模式：nginx upstream 改用 unix socket，宿主回环上不留 dsh 端口。"""
+
+    def test_upstream_is_tcp_by_default(self):
+        self.assertEqual(self.cfg.upstream_for("zhangsan", 13101), "127.0.0.1:13101")
+
+    def test_upstream_is_unix_socket_when_enabled(self):
+        self.cfg.netns = True
+        self.assertEqual(self.cfg.upstream_for("zhangsan", 13101),
+                         f"unix:{self.cfg.root}/dsh-sockets/zhangsan/dsh.sock:")
+
+    def test_nginx_map_uses_unix_sockets(self):
+        self.cfg.netns = True
+        self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        conf = self.cfg.nginx_conf.read_text(encoding="utf-8")
+        self.assertIn(f'"zhangsan"  unix:{self.cfg.root}/dsh-sockets/zhangsan/dsh.sock:;', conf)
+        # 未匹配用户仍走 TCP 黑洞 -> 403，而不是 socket 不存在的 502
+        self.assertIn("default     127.0.0.1:13100;", conf)
+
+    def test_netns_flag_reaches_sandbox_launcher(self):
+        self.cfg.netns = True
+        self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        # --check 必须带着 DSH_NETNS=1，才能顺带校验 pasta/socat 是否就位
+        checks = [c for c in self.runner.calls if "--check" in c]
+        self.assertTrue(checks, "建号前应先自检沙箱")
+
+
 class TestUpdate(TempCase):
     def setUp(self):
         super().setUp()

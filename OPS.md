@@ -200,12 +200,12 @@ echo 'kernel.apparmor_restrict_unprivileged_userns=0' \
 > 前者是实例自己（也就是被约束方）在写的：用户删光工作区就能让推导结果为空，
 > 进而拿到不设限的实例。约束的依据不能由被约束方提供。
 
-## 残留风险：实例间的网络可达性
+## 网络面：实例间可达性
 
-沙箱与宿主**共享网络命名空间**（dsh 要出网调模型 API），所以实例仍能连
+沙箱默认与宿主**共享网络命名空间**（dsh 要出网调模型 API），所以实例仍能连
 `127.0.0.1` 上的服务。
 
-已封堵（靠「能连上 ≠ 能调用」）：
+已封堵（靠「能连上 != 能调用」）：
 
 | 目标 | 手段 |
 |------|------|
@@ -214,17 +214,48 @@ echo 'kernel.apparmor_restrict_unprivileged_userns=0' \
 
 密钥由 `scripts/init-secrets.sh` 生成（幂等，`start-all.sh` 会自动调用），
 落在 `nginx/conf/generated/`（600，已 gitignore）。轮换：删掉
-`admin/.admin-token` 和 `nginx/conf/generated/fb-auth.conf` 后重跑该脚本，
+`admin/.admin-token` 与 `nginx/conf/generated/fb-auth.conf` 后重跑该脚本，
 再 `fb-start.sh restart` + `nginx-start.sh reload`。
 
-**未封堵**：员工 A 的实例可直连员工 B 的 dsh 端口 `127.0.0.1:1310x`，驱动 B 的
-agent 读写 B 的工作区。dsh 对入站请求不做身份校验，路由完全靠 nginx 的 `map $user`。
+### DSH_NETNS=1：封掉实例间互连
 
-完整修复需要给每个实例独立网络命名空间：`--unshare-net` 后用 `pasta`（passt 包）
-提供出网 + 入站端口转发，并加 `--no-map-gw` 断掉经网关回连宿主的路径。
-本仓库没有默认启用，因为它无法在开发环境验证，贸然上线会让全部实例起不来。
-上线前请先在单个实例上验证 dsh 的出网和 nginx 的入站都正常。
-`preflight-sandbox.sh` 第 4 节会把这项的实际状态测出来。
+默认形态下**员工 A 可直连员工 B 的 dsh 端口** `127.0.0.1:1310x`，驱动 B 的
+agent 读写 B 的工作区（dsh 对入站不做身份校验，路由全靠 nginx 的 map）。
+
+开启 `DSH_NETNS=1` 后：每实例一个独立网络命名空间，pasta 提供出网与 DNS
+转发，入站改走 unix socket，**宿主回环上不再留下任何 dsh 端口**。
+
+```bash
+sudo apt-get install -y passt socat
+export DSH_NETNS=1
+/home/ubuntu/dsh-runtime/start-all.sh
+python3 /home/ubuntu/admin/cli.py sync-nginx     # upstream 换成 unix socket
+/home/ubuntu/scripts/preflight-sandbox.sh
+```
+
+实现要点：
+
+- socket 位于 `~/dsh-sockets/<user>/dsh.sock`（目录 700，只把**本人**那个目录
+  挂进沙箱，所以沙箱里看不到别人的 socket 路径）
+- nginx 的 `map $user $dsh_upstream` 会由 `cli.py sync-nginx` 改写成
+  `unix:/home/ubuntu/dsh-sockets/<user>/dsh.sock:` 形式；default 仍保持
+  TCP 黑洞 `127.0.0.1:13100`，因为未匹配用户要的是 403 而不是 socket
+  不存在导致的 502
+- `pasta --no-map-gw` 断掉经网关回连宿主的路径；`-t none -u none` 不做任何
+  入站端口转发
+- 沙箱内 `/etc/resolv.conf` 被换成指向 pasta 的 DNS 转发器（`10.0.2.3`）
+
+**踩过的坑**：pasta 的 `--no-splice` **不解决问题**——它仍会把命名空间的回环
+连接转发到宿主回环。真正起作用的是「宿主回环上根本没有那个端口」，所以必须
+走 unix socket，而不是 `pasta -t <port>` 端口转发。
+
+**排障**：若 nginx 报 `502 ... connect() to unix:... failed (13: Permission denied)`，
+是 nginx worker 与 socket 属主不是同一个用户。本部署两者同为 ubuntu，
+若你改过 nginx 的 `user` 指令需要调回来。
+
+**验收**：`tests/test_sandbox.py::NetnsIsolationTest` 每次 CI 都会真跑一遍
+（用真实的 `dsh-sandbox.sh`），断言宿主回环上无 dsh 端口、员工 A 三条路都
+连不到 B、nginx 经 unix socket 正常、沙箱内出网正常。
 
 ## 容器入口点
 

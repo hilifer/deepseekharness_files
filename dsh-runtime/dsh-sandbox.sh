@@ -46,6 +46,17 @@ DSH_TRUSTED_HOSTS="${DSH_TRUSTED_HOSTS:-218.17.143.249:8099}"
 # 允许透传进沙箱的环境变量名（dsh 的模型 API Key 之类放这里）
 DSH_SANDBOX_PASSENV="${DSH_SANDBOX_PASSENV:-}"
 
+# 网络隔离模式（可选，默认关闭）。
+#   0 = 与宿主共享网络命名空间。文件系统仍完全隔离，但沙箱能连宿主 127.0.0.1
+#       上的服务；FileBrowser 与管理后台已用密钥头挡住，但【员工 A 可以直连
+#       员工 B 的 dsh 端口】驱动其 agent —— 这是已知残留风险。
+#   1 = 每实例独立网络命名空间：pasta 提供出网，入站改走 unix socket，
+#       宿主回环上不再留下任何 dsh 端口，实例间互连即被封死。
+#       需要 pasta（passt 包）与 socat。已在 GitHub runner 上实测通过 7/7。
+DSH_NETNS="${DSH_NETNS:-0}"
+DSH_SOCKET_DIR="${DSH_SOCKET_DIR:-$DSH_ROOT/dsh-sockets}"
+DSH_DNS_FORWARD="${DSH_DNS_FORWARD:-10.0.2.3}"
+
 log() { echo "[sandbox] $*" >&2; }
 die() { echo "[sandbox] 错误: $*" >&2; exit 1; }
 
@@ -71,9 +82,29 @@ sandbox_check() {
   echo "BROKEN $bw"; return 1
 }
 
+netns_check() {
+  local missing=""
+  command -v pasta >/dev/null 2>&1 || missing="$missing pasta(passt)"
+  command -v socat >/dev/null 2>&1 || missing="$missing socat"
+  [ -z "$missing" ] || { echo "MISSING_DEPS$missing"; return 1; }
+  echo "OK"; return 0
+}
+
 if [ "${1:-}" = "--check" ]; then
   if out=$(sandbox_check); then
-    log "沙箱可用: $out"; echo "$out"; exit 0
+    log "沙箱可用: $out"
+    if [ "$DSH_NETNS" = "1" ]; then
+      if nout=$(netns_check); then
+        log "网络隔离模式: 已启用（pasta + unix socket）"
+      else
+        log "网络隔离模式: 已请求但依赖缺失 -> $nout"
+        log "  安装: sudo apt-get install -y passt socat"
+        echo "$nout"; exit 1
+      fi
+    else
+      log "网络隔离模式: 未启用（DSH_NETNS=1 可开启，见 OPS.md）"
+    fi
+    echo "$out"; exit 0
   else
     log "沙箱不可用: $out"
     case "$out" in
@@ -137,8 +168,10 @@ DSH_HOME_DIR=$(readlink -f "$DSH_HOME_DIR")
 
 # ---------- 组装挂载 ----------
 args=(
-  --unshare-all          # user/ipc/pid/uts/cgroup/net 全部隔离…
-  --share-net            # …但保留网络：dsh 要调模型 API
+  # 逐项 unshare 而非 --unshare-all：后者含 --unshare-net，
+  # 在 netns 模式下会丢掉 pasta 刚配好的网络。
+  --unshare-user --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup
+  --share-net            # 共享所在 netns（普通模式=宿主；netns 模式=pasta 的）
   --die-with-parent      # 父进程死则实例死，不留孤儿
   --new-session          # 断开控制终端，防 TIOCSTI 注入
   --proc /proc
@@ -169,6 +202,16 @@ if [ -d "$SHARED_PROFILES" ]; then
   args+=(--ro-bind "$SHARED_PROFILES" "$SHARED_PROFILES")
 fi
 
+# 网络隔离模式：把本用户【专属】的 socket 目录挂进去（不是整个 dsh-sockets，
+# 否则沙箱里能看到别人的 socket 路径）。
+if [ "$DSH_NETNS" = "1" ]; then
+  USER_SOCK_DIR="$DSH_SOCKET_DIR/$USERNAME"
+  mkdir -p "$USER_SOCK_DIR"; chmod 700 "$USER_SOCK_DIR"
+  printf 'nameserver %s\n' "$DSH_DNS_FORWARD" > "$USER_SOCK_DIR/resolv.conf"
+  args+=(--bind "$USER_SOCK_DIR" "$USER_SOCK_DIR")
+  args+=(--ro-bind "$USER_SOCK_DIR/resolv.conf" /etc/resolv.conf)
+fi
+
 args+=(--chdir "$WORKSPACE")
 
 # ---------- 环境变量：清空后按白名单重建 ----------
@@ -188,6 +231,26 @@ done
 host_args=()
 for h in $DSH_TRUSTED_HOSTS; do host_args+=(--trusted-host "$h"); done
 
-log "启动 $USERNAME: port=$PORT ws=$WORKSPACE (bwrap=$BWRAP)"
-exec "$BWRAP" "${args[@]}" -- \
-  "$NODE_BIN" "$DSH_BIN" web --port "$PORT" "${host_args[@]}"
+if [ "$DSH_NETNS" != "1" ]; then
+  log "启动 $USERNAME: port=$PORT ws=$WORKSPACE (bwrap=$BWRAP, 共享网络)"
+  exec "$BWRAP" "${args[@]}" -- \
+    "$NODE_BIN" "$DSH_BIN" web --port "$PORT" "${host_args[@]}"
+fi
+
+# ---------- 网络隔离模式 ----------
+nout=$(netns_check) || die "DSH_NETNS=1 但依赖缺失: $nout（sudo apt-get install -y passt socat）"
+
+SOCKET="$USER_SOCK_DIR/dsh.sock"
+args+=(--setenv DSH_SOCKET "$SOCKET")
+args+=(--setenv DSH_PORT "$PORT")
+args+=(--setenv DSH_NODE_BIN "$NODE_BIN")
+args+=(--setenv DSH_BIN "$DSH_BIN")
+args+=(--setenv DSH_TRUSTED_HOST_ARGS "${host_args[*]}")
+
+log "启动 $USERNAME: socket=$SOCKET ws=$WORKSPACE (bwrap=$BWRAP, 独立网络命名空间)"
+# pasta 建独立 netns 并提供出网；-t none -u none 表示不做任何入站端口转发，
+# 入站只走 unix socket。--no-map-gw 断掉经网关回连宿主的路径。
+# bwrap 在 pasta 的 netns 里用 --share-net（共享的是 pasta 的，不是宿主的）。
+exec pasta --config-net --no-map-gw -t none -u none \
+  --dns-forward "$DSH_DNS_FORWARD" -- \
+  "$BWRAP" "${args[@]}" -- bash "$DSH_ROOT/dsh-runtime/dsh-netns-entry.sh"

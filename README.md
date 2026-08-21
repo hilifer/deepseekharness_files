@@ -156,6 +156,76 @@ python3 -m unittest discover -s tests -v
 
 用 `./scripts/preflight-sandbox.sh` 实测验收，它不看配置写了什么，只看实际能不能读到。
 
+### 网络隔离（可选，默认关闭）
+
+沙箱默认与宿主共享网络命名空间（dsh 要出网调模型 API），因此能连到
+`127.0.0.1` 上的服务。其中 FileBrowser 与管理后台已用密钥头挡住，
+但**员工 A 可以直连员工 B 的 dsh 端口**驱动其 agent —— 这是残留风险。
+
+`DSH_NETNS=1` 关掉这条路：每个实例跑在自己的网络命名空间里（pasta 提供出网
+与 DNS 转发），入站改走 unix socket，**宿主回环上不再留下任何 dsh 端口**，
+没有端口也就无从连起。
+
+```bash
+sudo apt-get install -y passt socat        # 新增依赖
+export DSH_NETNS=1                         # 写进容器 entrypoint 环境
+./dsh-runtime/start-all.sh
+python3 admin/cli.py sync-nginx            # nginx upstream 换成 unix socket
+./scripts/preflight-sandbox.sh             # 验收
+```
+
+已在 GitHub runner 上实测（`tests/test_sandbox.py::NetnsIsolationTest`，
+每次 CI 都会真跑）：宿主 `ss -ltn` 中不再有 dsh 端口、员工 A 经回环 / 经宿主
+网卡 / 经他人 socket 三条路都连不到 B、nginx 经 unix socket 正常代理、
+沙箱内 DNS 与出网 HTTPS 均正常。
+
+> 默认不开是因为它引入两个新依赖，且 dsh 侧的行为无法在开发环境完全验证。
+> 建议先在单个员工实例上开启验证，再全量切换。
+
+## 持续集成
+
+`.github/workflows/ci.yml`，每次 push / PR 自动跑五个 job：
+
+| job | 内容 |
+|-----|------|
+| `tests` | 63 项单元与接口测试。装 bubblewrap 后**真跑沙箱**，并断言隔离测试没有被 skip——否则 CI 绿得没有意义 |
+| `isolation-report` | 搭一棵仿真部署树跑 `preflight-sandbox.sh`，结果写进 Actions 的 Summary 页 |
+| `shell` | 全部 `.sh` 的 `bash -n` + shellcheck |
+| `nginx-config` | 按线上的 `/home/ubuntu` 绝对路径布好目录树，真跑 `nginx -t`，并断言两张路由 map、`/files` 重定向、`/admin/` 与 `/files/` 的 `auth_request` 都在 |
+| `secrets-hygiene` | 仓库里不得出现私钥、真实 argon2 哈希，以及 `admin/.admin-token` / `nginx/conf/generated/` / `registry.json` 等运行数据 |
+
+本地跑全套：
+
+```bash
+sudo apt-get install -y bubblewrap     # 隔离测试需要，没装则自动跳过
+python3 -m unittest discover -s tests -v
+```
+
+## 安全说明
+
+- 所有密钥/密码哈希/明文初始密码/TLS 私钥均不入库；配置以 `.example` 模板提供
+- 后端服务全部绑定 127.0.0.1，仅 nginx 监听公网端口。**注意**：dsh 自身的监听地址
+  未显式指定，首次部署请用 `ss -ltnp | grep -E '3080|1310'` 确认是 `127.0.0.1` 而非
+  `0.0.0.0`——若是后者，直连实例端口可完全绕过 SSO
+- 用户名/姓名/部门经白名单校验后才写入 YAML、nginx 配置和文件路径
+
+### 工作区隔离（两层）
+
+| 层 | 机制 | 挡得住什么 |
+|----|------|-----------|
+| 内核 | bubblewrap 挂载命名空间（`dsh-runtime/dsh-sandbox.sh`） | 一切文件访问。工作区以外的路径在实例内不存在，bash 用绝对路径也读不到 |
+| UX | 目录选择器钳制插件（`dsh-plugin-clamped-picker`） | 选择器默认开在根目录、面包屑不显示上层 |
+
+沙箱内可见的全部内容：系统运行时（只读）、node+dsh 程序（只读）、共享插件（只读）、
+本人 DSH_HOME（读写）、本人工作区（读写）、`/proc` `/dev` 私有 `/tmp`。
+`dsh-auth/`（含全员明文初始密码）、`nginx/certs/`（TLS 私钥）、`filebrowser/`
+（权限库）、`admin/`（后台代码与 token）、其他部门与其他员工的目录**均不存在**。
+
+沙箱不可用时 `start-all.sh` 拒绝启动任何实例、管理后台拒绝建号——宁可服务不可用，
+也不退回无隔离运行。排障可用 `DSH_ALLOW_UNCONFINED=1` 显式放行（会大声告警）。
+
+用 `./scripts/preflight-sandbox.sh` 实测验收，它不看配置写了什么，只看实际能不能读到。
+
 ### 已知残留风险
 
 沙箱与宿主**共享网络命名空间**（dsh 需要出网调模型 API），所以实例仍能连到
