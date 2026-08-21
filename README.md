@@ -112,6 +112,25 @@ INIT_PW='初始密码' ./scripts/provision-user.sh wang_er 研发部 员工 王�
   覆盖 patch 服务，须禁用它并直接挂载钳制后端 + 客户端 surface 包，
   允许根由实例进程的 `DSH_ALLOWED_ROOT` 注入
 
+## 持续集成
+
+`.github/workflows/ci.yml`，每次 push / PR 自动跑五个 job：
+
+| job | 内容 |
+|-----|------|
+| `tests` | 63 项单元与接口测试。装 bubblewrap 后**真跑沙箱**，并断言隔离测试没有被 skip——否则 CI 绿得没有意义 |
+| `isolation-report` | 搭一棵仿真部署树跑 `preflight-sandbox.sh`，结果写进 Actions 的 Summary 页 |
+| `shell` | 全部 `.sh` 的 `bash -n` + shellcheck |
+| `nginx-config` | 按线上的 `/home/ubuntu` 绝对路径布好目录树，真跑 `nginx -t`，并断言两张路由 map、`/files` 重定向、`/admin/` 与 `/files/` 的 `auth_request` 都在 |
+| `secrets-hygiene` | 仓库里不得出现私钥、真实 argon2 哈希，以及 `admin/.admin-token` / `nginx/conf/generated/` / `registry.json` 等运行数据 |
+
+本地跑全套：
+
+```bash
+sudo apt-get install -y bubblewrap     # 隔离测试需要，没装则自动跳过
+python3 -m unittest discover -s tests -v
+```
+
 ## 安全说明
 
 - 所有密钥/密码哈希/明文初始密码/TLS 私钥均不入库；配置以 `.example` 模板提供

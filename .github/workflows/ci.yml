@@ -1,0 +1,202 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: 单元与接口测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装 bubblewrap
+        # 隔离测试要真跑沙箱。GitHub runner 是虚机，非特权 user namespace 可用。
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap
+          bwrap --version
+
+      - name: 确认沙箱在本 runner 上可用
+        # 没这一步的话，隔离测试会被 skipUnless 静默跳过，CI 绿得毫无意义。
+        run: |
+          if ! bwrap --ro-bind / / --unshare-all --share-net true; then
+            echo "::error::runner 上非特权 user namespace 不可用，隔离测试会被跳过"
+            exit 1
+          fi
+          echo "✅ 沙箱可用"
+
+      - name: 跑测试
+        run: python3 -m unittest discover -s tests -v
+
+      - name: 确认隔离测试确实跑了（而非被跳过）
+        run: |
+          OUT=$(python3 -m unittest tests.test_sandbox 2>&1) || {
+            echo "$OUT"; echo "::error::沙箱隔离测试失败"; exit 1; }
+          echo "$OUT"
+          if echo "$OUT" | grep -q "skipped"; then
+            echo "::error::沙箱隔离测试被跳过了（skipUnless 生效），CI 绿得没有意义"; exit 1
+          fi
+          echo "$OUT" | grep -qE "Ran ([0-9]+) tests" || { echo "::error::没跑到测试"; exit 1; }
+
+  isolation-report:
+    name: 隔离验收报告
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+
+      - name: 安装 bubblewrap
+        run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+
+      - name: 搭一棵仿真部署树
+        run: |
+          set -eu
+          R="$HOME/fakedeploy"
+          mkdir -p "$R"/{dsh-auth/config,nginx/certs,filebrowser,admin,dsh-runtime,scripts,node/bin}
+          mkdir -p "$R"/dsh-files/departments/{研发部/{张三,赵六},财务部/王五}
+          mkdir -p "$R"/dsh-users/{zhangsan,zhaoliu} "$R"/.local/share/dsh/profiles
+          echo '全员明文初始密码' > "$R/dsh-auth/initial-credentials.txt"
+          echo 'users: {}'       > "$R/dsh-auth/config/users_database.yml"
+          echo 'PRIVKEY'         > "$R/nginx/certs/dsh.key"
+          echo 'SQLITE'          > "$R/filebrowser/database.db"
+          echo 'deadbeef'        > "$R/admin/.admin-token"
+          echo '财务机密'         > "$R/dsh-files/departments/财务部/王五/工资表.xlsx"
+          cp admin/core.py admin/cli.py "$R/admin/"
+          cp dsh-runtime/dsh-sandbox.sh "$R/dsh-runtime/"
+          cp scripts/preflight-sandbox.sh "$R/scripts/"
+          cp /bin/bash "$R/node/bin/node"
+          python3 - "$R" <<'PY'
+          import json, sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          users = {}
+          for name, py, port in (("张三", "zhangsan", 13101), ("赵六", "zhaoliu", 13102)):
+              users[py] = {"username": py, "name": name, "department": "研发部",
+                           "role": "员工", "port": port,
+                           "workspace": str(root / "dsh-files/departments/研发部" / name)}
+          (root / "dsh-users/registry.json").write_text(
+              json.dumps({"version": 1, "users": users}, ensure_ascii=False, indent=2))
+          PY
+
+      - name: 跑隔离验收（preflight）
+        # 这一步同时也是 preflight 脚本自身的冒烟测试：它有 bash 错误就会在这里暴露。
+        run: |
+          set -o pipefail   # 否则 preflight 失败会被 tee 的成功退出码吞掉，job 假绿
+          DSH_ROOT="$HOME/fakedeploy" "$HOME/fakedeploy/scripts/preflight-sandbox.sh" zhangsan \
+            | tee "$RUNNER_TEMP/preflight.txt"
+          echo '### 隔离验收结果' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/preflight.txt" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  shell:
+    name: Shell 语法与 shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n 全量语法检查
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            bash -n "$f" || { echo "::error file=$f::bash 语法错误"; fail=1; }
+          done < <(find . -name '*.sh' -not -path './.git/*')
+          exit $fail
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y shellcheck
+          # SC1091: 不追踪 source 的外部文件；SC2016: 单引号里的 $ 是 nginx 变量，不是待展开的
+          find . -name '*.sh' -not -path './.git/*' -print0 \
+            | xargs -0 shellcheck -S warning -e SC1091,SC2016 || true
+
+  nginx-config:
+    name: nginx 配置校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 nginx 与 openssl
+        run: sudo apt-get update -qq && sudo apt-get install -y nginx-full openssl
+
+      - name: 按线上路径布好 /home/ubuntu 目录树
+        # 配置里全是 /home/ubuntu 绝对路径，必须原样搭出来才能 nginx -t
+        run: |
+          set -eu
+          sudo mkdir -p /home/ubuntu
+          sudo chown -R "$USER" /home/ubuntu
+          mkdir -p /home/ubuntu/nginx/{conf/sites,logs,certs,tmp} \
+                   /home/ubuntu/nginx/extracted/etc/nginx \
+                   /home/ubuntu/{admin,filebrowser,scripts}
+          cp -r nginx/conf/* /home/ubuntu/nginx/conf/
+          cp /etc/nginx/mime.types /home/ubuntu/nginx/extracted/etc/nginx/mime.types
+          cp filebrowser/config.yaml /home/ubuntu/filebrowser/
+          cp scripts/init-secrets.sh /home/ubuntu/scripts/
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout /home/ubuntu/nginx/certs/dsh.key \
+            -out /home/ubuntu/nginx/certs/dsh.crt -subj '/CN=ci' 2>/dev/null
+
+      - name: 生成密钥（站点配置 include 依赖它）
+        run: /home/ubuntu/scripts/init-secrets.sh
+
+      - name: nginx -t
+        run: sudo nginx -t -c /home/ubuntu/nginx/conf/nginx.conf
+
+      - name: 断言关键路由确实生成了
+        run: |
+          set -eu
+          conf=/home/ubuntu/nginx/conf/nginx.conf
+          site=/home/ubuntu/nginx/conf/sites/dsh-auth.conf
+          grep -q 'map \$user \$dsh_upstream'  "$conf" || { echo "::error::缺 dsh 路由 map"; exit 1; }
+          grep -q 'map \$user \$admin_upstream' "$conf" || { echo "::error::缺管理后台路由 map"; exit 1; }
+          grep -q 'location = /files'           "$site" || { echo "::error::缺 /files 尾斜杠重定向"; exit 1; }
+          grep -q 'location /admin/'            "$site" || { echo "::error::缺 /admin/ 站点"; exit 1; }
+          # 管理后台与 /files 都必须挂 auth_request，不能有裸奔的入口
+          for loc in '/admin/' '/files/'; do
+            awk -v loc="location $loc" '
+              index($0, loc) {inblock=1}
+              inblock && /auth_request \/internal\/authelia\/authz/ {found=1}
+              inblock && /^    }/ {inblock=0}
+              END {exit !found}' "$site" \
+              || { echo "::error::location $loc 没有 auth_request"; exit 1; }
+          done
+          echo "✅ 路由与鉴权断言通过"
+
+  secrets-hygiene:
+    name: 密钥卫生
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 仓库里不得出现真实密钥
+        run: |
+          set -eu
+          fail=0
+          # 私钥
+          if git grep -nE -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' -- . ':!*.yml'; then
+            echo "::error::仓库里有私钥"; fail=1
+          fi
+          # 真实 argon2 哈希（.example 模板里的 REPLACE_ME 占位不算）
+          if git grep -nE '\$argon2id\$v=19\$m=[0-9]+,t=[0-9]+,p=[0-9]+\$[A-Za-z0-9+/]{16,}' \
+             -- . ':!*.example.yml' ':!tests/*'; then
+            echo "::error::仓库里有真实 argon2 哈希"; fail=1
+          fi
+          # 生成的共享密钥不得入库
+          for f in admin/.admin-token nginx/conf/generated dsh-users/registry.json; do
+            if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+              echo "::error::$f 被提交了，应由 .gitignore 排除"; fail=1
+            fi
+          done
+          [ $fail -eq 0 ] && echo "✅ 未发现真实密钥"
+          exit $fail

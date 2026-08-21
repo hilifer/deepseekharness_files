@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+沙箱隔离的回归测试 —— 真跑 bubblewrap，实测「工作区以外碰不碰得到」。
+
+这不是对配置的断言，是对行为的断言：在沙箱里真的去 cat 那些文件，
+读到了就 FAIL。dsh-sandbox.sh 的任何改动（挂载项、顺序、命名空间开关）
+若削弱了隔离，这里会立刻红。
+
+没装 bubblewrap 时整体跳过，避免在没有沙箱的开发机上误报。
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+SANDBOX = REPO / "dsh-runtime" / "dsh-sandbox.sh"
+
+
+def _bwrap_works() -> bool:
+    """bwrap 存在，且非特权 user namespace 真的能用。"""
+    if not shutil.which("bwrap"):
+        return False
+    try:
+        return subprocess.run(
+            ["bwrap", "--ro-bind", "/", "/", "--unshare-all", "--share-net", "true"],
+            capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+BWRAP_OK = _bwrap_works()
+
+# 沙箱内执行的探针：逐项试探，输出 KEY=VALUE
+PROBE = r'''
+R="$P_ROOT"
+seal() { cat "$1" >/dev/null 2>&1 && echo LEAK || echo SEALED; }
+echo "CREDS=$(seal "$R/dsh-auth/initial-credentials.txt")"
+echo "USERDB=$(seal "$R/dsh-auth/config/users_database.yml")"
+echo "TLSKEY=$(seal "$R/nginx/certs/dsh.key")"
+echo "FBDB=$(seal "$R/filebrowser/database.db")"
+echo "ADMTOK=$(seal "$R/admin/.admin-token")"
+echo "ADMSRC=$(seal "$R/admin/core.py")"
+echo "REGISTRY=$(seal "$R/dsh-users/registry.json")"
+echo "PEERFILE=$(seal "$R/dsh-files/departments/财务部/王五/工资表.xlsx")"
+echo "SAMEDEPT=$(seal "$R/dsh-files/departments/研发部/赵六/note.txt")"
+echo "PEERHOME=$(seal "$R/dsh-users/zhaoliu/state.json")"
+echo "DEPTS=$(ls "$R/dsh-files/departments" 2>/dev/null | tr '\n' ',')"
+echo "USERS=$(ls "$R/dsh-users" 2>/dev/null | tr '\n' ',')"
+echo "MYDEPT=$(ls "$R/dsh-files/departments/研发部" 2>/dev/null | tr '\n' ',')"
+echo "OWNREAD=$(cat "$P_WS/我的文档.txt" 2>/dev/null || echo FAIL)"
+echo "OWNWRITE=$(touch "$P_WS/.probe" 2>/dev/null && echo OK || echo FAIL)"
+echo "HOMEWRITE=$(touch "$P_HOME/.probe" 2>/dev/null && echo OK || echo FAIL)"
+echo "TMPWRITE=$(touch /tmp/.probe 2>/dev/null && echo OK || echo FAIL)"
+echo "PROFRO=$(touch "$R/.local/share/dsh/profiles/x" 2>/dev/null && echo WRITABLE || echo READONLY)"
+echo "NODERO=$(touch "$R/node/bin/x" 2>/dev/null && echo WRITABLE || echo READONLY)"
+echo "PROCS=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l)"
+echo "ARGS=$*"
+'''
+
+
+@unittest.skipUnless(BWRAP_OK, "bubblewrap 不可用或内核禁用了非特权 user namespace")
+class SandboxIsolationTest(unittest.TestCase):
+    """在一棵仿真部署树上跑沙箱，逐项验收。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name) / "home"
+        cls.root = root
+        for sub in ("dsh-auth/config", "nginx/certs", "filebrowser", "admin", "node/bin",
+                    "dsh-users/zhangsan/storages", "dsh-users/zhaoliu",
+                    "dsh-files/departments/研发部/张三", "dsh-files/departments/研发部/赵六",
+                    "dsh-files/departments/财务部/王五", ".local/share/dsh/profiles"):
+            (root / sub).mkdir(parents=True, exist_ok=True)
+
+        # 铺设「不该被看到」的高危目标
+        (root / "dsh-auth/initial-credentials.txt").write_text("zhangsan 张三 Passw0rd", encoding="utf-8")
+        (root / "dsh-auth/config/users_database.yml").write_text("users: {}", encoding="utf-8")
+        (root / "nginx/certs/dsh.key").write_text("FAKE-TLS-KEY-FIXTURE-NOT-A-REAL-PEM", encoding="utf-8")
+        (root / "filebrowser/database.db").write_text("SQLITE", encoding="utf-8")
+        (root / "admin/.admin-token").write_text("deadbeef", encoding="utf-8")
+        (root / "admin/core.py").write_text("# engine", encoding="utf-8")
+        (root / "dsh-users/registry.json").write_text('{"users":{}}', encoding="utf-8")
+        (root / "dsh-users/zhaoliu/state.json").write_text("赵六的状态", encoding="utf-8")
+        (root / "dsh-files/departments/财务部/王五/工资表.xlsx").write_text("机密", encoding="utf-8")
+        (root / "dsh-files/departments/研发部/赵六/note.txt").write_text("赵六的笔记", encoding="utf-8")
+        (root / ".local/share/dsh/profiles/index.mjs").write_text("export default 1", encoding="utf-8")
+        # 本人工作区
+        cls.ws = root / "dsh-files/departments/研发部/张三"
+        (cls.ws / "我的文档.txt").write_text("我的内容", encoding="utf-8")
+        cls.home = root / "dsh-users/zhangsan"
+
+        # 冒充 node + dsh
+        shutil.copy("/bin/bash", root / "node/bin/node")
+        probe = root / "node/bin/dsh"
+        probe.write_text(PROBE, encoding="utf-8")
+        probe.chmod(0o755)
+
+        cls.out = cls._run_sandbox("zhangsan", cls.home, cls.ws)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    @classmethod
+    def _run_sandbox(cls, user: str, home: Path, ws: Path) -> dict[str, str]:
+        env = {
+            **os.environ,
+            "DSH_ROOT": str(cls.root),
+            "DSH_NODE_ROOT": str(cls.root / "node"),
+            "DSH_NODE_BIN": str(cls.root / "node/bin/node"),
+            "DSH_BIN": str(cls.root / "node/bin/dsh"),
+            "DSH_SHARED_PROFILES": str(cls.root / ".local/share/dsh/profiles"),
+            "DSH_SANDBOX_PASSENV": "P_ROOT P_WS P_HOME",
+            "P_ROOT": str(cls.root), "P_WS": str(ws), "P_HOME": str(home),
+        }
+        res = subprocess.run([str(SANDBOX), user, "13101", str(home), str(ws)],
+                             capture_output=True, text=True, timeout=90, env=env)
+        parsed = {}
+        for line in res.stdout.splitlines():
+            if "=" in line:
+                key, _, val = line.partition("=")
+                parsed[key.strip()] = val.strip()
+        if not parsed:
+            raise AssertionError(f"探针无输出。stdout={res.stdout!r} stderr={res.stderr!r}")
+        return parsed
+
+    # ---------- 不该看到的 ----------
+    def test_credentials_file_sealed(self):
+        """initial-credentials.txt 是全员明文初始密码，泄露等于全公司账号失守。"""
+        self.assertEqual(self.out["CREDS"], "SEALED")
+
+    def test_authelia_userdb_sealed(self):
+        self.assertEqual(self.out["USERDB"], "SEALED")
+
+    def test_tls_private_key_sealed(self):
+        self.assertEqual(self.out["TLSKEY"], "SEALED")
+
+    def test_filebrowser_db_sealed(self):
+        self.assertEqual(self.out["FBDB"], "SEALED")
+
+    def test_admin_token_sealed(self):
+        """管理后台 token 若能读到，沙箱内就能直调 API 任意增删员工。"""
+        self.assertEqual(self.out["ADMTOK"], "SEALED")
+
+    def test_admin_source_sealed(self):
+        self.assertEqual(self.out["ADMSRC"], "SEALED")
+
+    def test_registry_sealed(self):
+        self.assertEqual(self.out["REGISTRY"], "SEALED")
+
+    def test_other_department_file_sealed(self):
+        self.assertEqual(self.out["PEERFILE"], "SEALED")
+
+    def test_same_department_peer_sealed(self):
+        """同部门同事的目录也必须看不到——scope 是个人，不是部门。"""
+        self.assertEqual(self.out["SAMEDEPT"], "SEALED")
+
+    def test_peer_dsh_home_sealed(self):
+        self.assertEqual(self.out["PEERHOME"], "SEALED")
+
+    # ---------- 目录遍历面 ----------
+    def test_only_own_department_visible(self):
+        self.assertEqual(self.out["DEPTS"].strip(","), "研发部")
+
+    def test_only_self_visible_in_own_department(self):
+        self.assertEqual(self.out["MYDEPT"].strip(","), "张三")
+
+    def test_only_own_dsh_home_visible(self):
+        self.assertEqual(self.out["USERS"].strip(","), "zhangsan")
+
+    # ---------- 该能用的 ----------
+    def test_own_workspace_readable(self):
+        self.assertEqual(self.out["OWNREAD"], "我的内容")
+
+    def test_own_workspace_writable(self):
+        self.assertEqual(self.out["OWNWRITE"], "OK")
+
+    def test_own_dsh_home_writable(self):
+        self.assertEqual(self.out["HOMEWRITE"], "OK")
+
+    def test_tmp_writable(self):
+        self.assertEqual(self.out["TMPWRITE"], "OK")
+
+    # ---------- 只读面 ----------
+    def test_shared_profiles_readonly(self):
+        """profiles 全实例共享；可写则任何员工都能改插件影响全体。"""
+        self.assertEqual(self.out["PROFRO"], "READONLY")
+
+    def test_node_and_dsh_readonly(self):
+        self.assertEqual(self.out["NODERO"], "READONLY")
+
+    # ---------- 命名空间 ----------
+    def test_pid_namespace_isolated(self):
+        """ps 看不到宿主进程，顺带堵住 authelia hash 命令行短暂暴露密码。"""
+        self.assertLess(int(self.out["PROCS"]), 20)
+
+    def test_trusted_host_passed_through(self):
+        self.assertIn("--trusted-host", self.out["ARGS"])
+        self.assertIn("web --port 13101", self.out["ARGS"])
+
+
+class SandboxFailClosedTest(unittest.TestCase):
+    """沙箱不可用时必须拒绝启动，而不是退回无隔离运行。"""
+
+    def test_refuses_to_start_without_bwrap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "node/bin").mkdir(parents=True)
+            (root / "ws").mkdir()
+            (root / "home").mkdir()
+            # 复制一份去掉硬编码 bwrap 候选路径的启动器，模拟「系统里没有 bwrap」
+            script = SANDBOX.read_text(encoding="utf-8") \
+                .replace('"$DSH_ROOT/bwrap/usr/bin/bwrap" \\', '"/nope1" \\') \
+                .replace("/usr/bin/bwrap /bin/bwrap", "/nope2 /nope3")
+            fake = root / "sb.sh"
+            fake.write_text(script, encoding="utf-8")
+            fake.chmod(0o755)
+
+            env = {**os.environ, "PATH": str(root / "empty"),
+                   "DSH_ROOT": str(root), "DSH_NODE_ROOT": str(root / "node")}
+            env.pop("BWRAP_BIN", None)
+            res = subprocess.run([str(fake), "u", "13101", str(root / "home"), str(root / "ws")],
+                                 capture_output=True, text=True, timeout=30, env=env)
+            self.assertNotEqual(res.returncode, 0, "无沙箱时必须拒绝启动")
+            self.assertIn("拒绝", res.stderr)
+
+    def test_explicit_override_is_loud(self):
+        """DSH_ALLOW_UNCONFINED=1 可以放行，但必须打出醒目告警。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "node/bin").mkdir(parents=True)
+            (root / "ws").mkdir()
+            (root / "home").mkdir()
+            script = SANDBOX.read_text(encoding="utf-8") \
+                .replace('"$DSH_ROOT/bwrap/usr/bin/bwrap" \\', '"/nope1" \\') \
+                .replace("/usr/bin/bwrap /bin/bwrap", "/nope2 /nope3")
+            fake = root / "sb.sh"
+            fake.write_text(script, encoding="utf-8")
+            fake.chmod(0o755)
+            (root / "empty").mkdir()
+            env = {**os.environ, "PATH": str(root / "empty"),
+                   "DSH_ALLOW_UNCONFINED": "1", "DSH_ROOT": str(root),
+                   "DSH_NODE_ROOT": str(root / "node"), "DSH_NODE_BIN": "/bin/true",
+                   "DSH_BIN": "ignored"}
+            env.pop("BWRAP_BIN", None)
+            res = subprocess.run([str(fake), "u", "13101", str(root / "home"), str(root / "ws")],
+                                 capture_output=True, text=True, timeout=30, env=env)
+            self.assertIn("警告", res.stderr)
+            self.assertIn("无隔离", res.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
