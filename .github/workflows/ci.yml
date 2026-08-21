@@ -270,6 +270,27 @@ jobs:
       - name: 沙箱隔离测试在这种放行方式下同样通过
         run: python3 -m unittest tests.test_sandbox.SandboxIsolationTest -v
 
+      - name: 回归 —— sudo 下要能找到【免 root 装在调用者家目录】的 bwrap
+        # 真实部署顺序是：install-bubblewrap.sh 免 root 装到 $HOME/bwrap/，
+        # 然后 sudo 跑本脚本。sudo 会把 $HOME 变成 /root，早先的实现会去
+        # /root/bwrap/ 找而报「未找到 bwrap」。这里把系统 bwrap 暂时挪开来复现。
+        run: |
+          set -u
+          mkdir -p "$HOME/bwrap/usr/bin"
+          cp /usr/bin/bwrap "$HOME/bwrap/usr/bin/bwrap"
+          sudo mv /usr/bin/bwrap /usr/bin/bwrap.hidden
+          restore() { sudo mv -f /usr/bin/bwrap.hidden /usr/bin/bwrap 2>/dev/null || true; }
+          trap restore EXIT
+
+          OUT=$(sudo ./scripts/apparmor-allow-userns.sh --status 2>&1)
+          echo "$OUT"
+          if echo "$OUT" | grep -q "未安装"; then
+            echo "::error::sudo 下没找到调用者家目录里的 bwrap —— SUDO_USER 回退失效"; exit 1
+          fi
+          echo "$OUT" | grep -q "$HOME/bwrap/usr/bin/bwrap" || {
+            echo "::error::定位到的 bwrap 不是家目录里那个"; exit 1; }
+          echo "✅ sudo 下正确定位到 $HOME/bwrap/usr/bin/bwrap"
+
   alt-root:
     name: 非 /home/ubuntu 部署根
     runs-on: ubuntu-latest

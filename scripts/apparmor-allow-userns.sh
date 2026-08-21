@@ -17,6 +17,13 @@
 #   scripts/apparmor-allow-userns.sh --status        # 只看当前状态，不改动
 # =====================================================================
 set -euo pipefail
+
+# 本脚本要用 sudo 跑，但 bwrap 可能是免 root 装在【调用者】的家目录下
+# （install-bubblewrap.sh 装到 $HOME/bwrap/）。sudo 下 $HOME 会变成 /root，
+# 直接用 $HOME 会找不到那个 bwrap。所以优先按 SUDO_USER 的家目录来定位。
+if [ -z "${DSH_ROOT:-}" ] && [ -n "${SUDO_USER:-}" ]; then
+  DSH_ROOT=$(getent passwd "$SUDO_USER" | cut -d: -f6 || true)
+fi
 DSH_ROOT="${DSH_ROOT:-$HOME}"
 AA_SYSCTL=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
 MODE="${1:-profile}"
@@ -90,7 +97,7 @@ echo "改动后："; show_status
 echo
 if BW=$(find_bwrap) && "$BW" --ro-bind / / --unshare-all --share-net true 2>/dev/null; then
   echo "✅ 沙箱可用。下一步："
-  echo "   DSH_ROOT=\$HOME $DSH_ROOT/scripts/preflight-sandbox.sh"
+  echo "   DSH_ROOT=$DSH_ROOT $DSH_ROOT/scripts/preflight-sandbox.sh"
 else
   echo "❌ 仍不可用。若用的是 profile 方式，改试全局 sysctl: sudo $0 --sysctl"
   exit 1
