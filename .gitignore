@@ -8,6 +8,8 @@
 **/*.crt
 **/*.key
 **/configuration.yml
+admin/.admin-token
+nginx/conf/generated/          # nginx 注入的共享密钥（admin token / FileBrowser 头名）
 
 # 运行数据与日志
 **/*.log
@@ -16,3 +18,13 @@
 **/storages/
 **/node_modules/
 ports.json
+dsh-users/registry.json        # 员工登记表属于运行数据，随部署漂移
+admin/audit.log
+**/*.bak.*                     # users_database.yml / config.yaml 的自动备份
+
+# 无 root 安装的第三方二进制（由 scripts/install-bubblewrap.sh 生成）
+bwrap/
+
+# Python
+__pycache__/
+*.pyc

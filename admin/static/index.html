@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>员工管理 — 公司文件服务器</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#fff; --border:#e3e6ea; --text:#1a1d21; --muted:#6b7280;
+  --accent:#2563eb; --accent-fg:#fff; --danger:#dc2626; --ok:#16a34a; --warn:#d97706;
+  --shadow:0 1px 3px rgba(0,0,0,.08),0 4px 16px rgba(0,0,0,.04);
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#14171a;--panel:#1c2024;--border:#2b3138;--text:#e6e9ec;--muted:#9aa4b0;
+        --accent:#3b82f6;--danger:#ef4444;--ok:#22c55e;--warn:#f59e0b;
+        --shadow:0 1px 3px rgba(0,0,0,.4),0 4px 16px rgba(0,0,0,.25);}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;}
+.wrap{max-width:1180px;margin:0 auto;padding:24px 20px 64px}
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}
+h1{font-size:20px;margin:0;font-weight:650;letter-spacing:-.01em}
+.spacer{flex:1}
+button{font:inherit;border:1px solid var(--border);background:var(--panel);color:var(--text);
+  padding:7px 14px;border-radius:7px;cursor:pointer;transition:.12s}
+button:hover:not(:disabled){border-color:var(--muted)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);font-weight:550}
+button.primary:hover:not(:disabled){filter:brightness(1.08)}
+button.danger{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 40%,transparent)}
+button.danger:hover:not(:disabled){background:color-mix(in srgb,var(--danger) 10%,transparent)}
+button.sm{padding:4px 9px;font-size:12.5px;border-radius:6px}
+.banner{padding:11px 14px;border-radius:9px;margin-bottom:16px;border:1px solid;font-size:13.5px}
+.banner.ok{background:color-mix(in srgb,var(--ok) 9%,transparent);border-color:color-mix(in srgb,var(--ok) 35%,transparent)}
+.banner.bad{background:color-mix(in srgb,var(--danger) 9%,transparent);border-color:color-mix(in srgb,var(--danger) 40%,transparent)}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:11px;box-shadow:var(--shadow);overflow:hidden}
+.tablewrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;min-width:840px}
+th,td{padding:11px 14px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600;
+   background:color-mix(in srgb,var(--border) 22%,transparent)}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover{background:color-mix(in srgb,var(--border) 16%,transparent)}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px}
+.tag{display:inline-block;padding:1.5px 8px;border-radius:20px;font-size:12px;border:1px solid var(--border)}
+.tag.lead{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent);
+  background:color-mix(in srgb,var(--warn) 10%,transparent)}
+.dots{display:flex;gap:5px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--danger);cursor:help}
+.dot.on{background:var(--ok)}
+.muted{color:var(--muted)}
+.acts{display:flex;gap:6px;flex-wrap:wrap}
+dialog{border:1px solid var(--border);border-radius:13px;background:var(--panel);color:var(--text);
+  padding:0;box-shadow:0 12px 48px rgba(0,0,0,.28);max-width:94vw;width:440px}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.dlg-h{padding:16px 20px;border-bottom:1px solid var(--border);font-weight:600;font-size:15.5px}
+.dlg-b{padding:18px 20px;display:flex;flex-direction:column;gap:13px}
+.dlg-f{padding:14px 20px;border-top:1px solid var(--border);display:flex;gap:9px;justify-content:flex-end}
+label{display:flex;flex-direction:column;gap:5px;font-size:13px;color:var(--muted)}
+input,select{font:inherit;padding:8px 11px;border:1px solid var(--border);border-radius:7px;
+  background:var(--bg);color:var(--text);width:100%}
+input:focus,select:focus{outline:2px solid color-mix(in srgb,var(--accent) 45%,transparent);outline-offset:-1px}
+.hint{font-size:12px;color:var(--muted);line-height:1.45}
+.err{color:var(--danger);font-size:13px;white-space:pre-wrap}
+.chk{flex-direction:row;align-items:flex-start;gap:8px;color:var(--text);font-size:13.5px}
+.chk input{width:auto;margin-top:2px;flex:none}
+.pw{font-family:ui-monospace,monospace;font-size:16px;padding:11px;background:var(--bg);
+  border:1px dashed var(--border);border-radius:8px;text-align:center;user-select:all;word-break:break-all}
+.empty{padding:44px;text-align:center;color:var(--muted)}
+.spin{display:inline-block;width:13px;height:13px;border:2px solid var(--border);
+  border-top-color:var(--accent);border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px}
+@keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>员工管理</h1>
+    <span class="muted" id="who"></span>
+    <span class="spacer"></span>
+    <button id="refresh">刷新</button>
+    <button class="primary" id="new">+ 新增员工</button>
+  </header>
+
+  <div id="banner"></div>
+
+  <div class="panel">
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>用户名</th><th>姓名</th><th>部门</th><th>角色</th><th>dsh 端口</th>
+          <th>同步状态</th><th>工作区</th><th>操作</th>
+        </tr></thead>
+        <tbody id="rows"><tr><td colspan="8" class="empty"><span class="spin"></span> 加载中…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+  <p class="hint" style="margin-top:14px">
+    同步状态的五个点依次代表 <b>Authelia 账号 / nginx 路由 / FileBrowser 权限 / dsh 实例 / 工作区目录</b>。
+    全绿才是健康；变红说明该子系统与登记表不一致（通常是有人手工改过配置），把鼠标悬停在点上可看具体项。
+  </p>
+</div>
+
+<dialog id="dlg">
+  <form method="dialog">
+    <div class="dlg-h" id="dlg-title"></div>
+    <div class="dlg-b" id="dlg-body"></div>
+    <div class="dlg-f" id="dlg-foot"></div>
+  </form>
+</dialog>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: body ? {'Content-Type': 'application/json'} : {},
+    body: body ? JSON.stringify(body) : undefined,
+    credentials: 'same-origin',
+  });
+  let data = {};
+  try { data = await res.json(); } catch { /* 非 JSON 响应 */ }
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+/* ---------- 通用弹窗 ---------- */
+function dialog({title, bodyHTML, okText, okClass = 'primary', onOk, wide}) {
+  const dlg = $('#dlg');
+  $('#dlg-title').textContent = title;
+  $('#dlg-body').innerHTML = bodyHTML + '<div class="err" id="dlg-err" hidden></div>';
+  $('#dlg-foot').innerHTML =
+    `<button value="cancel" type="submit">取消</button>` +
+    (okText ? `<button class="${okClass}" id="dlg-ok" type="button">${esc(okText)}</button>` : '');
+  dlg.style.width = wide ? '520px' : '440px';
+  if (okText) {
+    $('#dlg-ok').onclick = async () => {
+      const btn = $('#dlg-ok'), err = $('#dlg-err');
+      btn.disabled = true; err.hidden = true;
+      const label = btn.textContent;
+      btn.innerHTML = '<span class="spin"></span> 处理中…';
+      try { await onOk(); dlg.close(); }
+      catch (e) { err.textContent = e.message; err.hidden = false; }
+      finally { btn.disabled = false; btn.textContent = label; }
+    };
+  }
+  dlg.showModal();
+}
+
+/* ---------- 列表 ---------- */
+let USERS = [];
+const LABELS = {authelia:'Authelia 账号', nginx:'nginx 路由',
+                filebrowser:'FileBrowser 权限', dsh:'dsh 实例', workspace:'工作区目录'};
+
+async function load() {
+  try {
+    const [health, data] = await Promise.all([
+      api('GET', '/admin/api/health'), api('GET', '/admin/api/users')
+    ]);
+    $('#who').textContent = `当前登录：${health.actor}`;
+    $('#banner').innerHTML = health.sandbox_ok
+      ? `<div class="banner ok">✅ 工作区隔离已生效（bubblewrap）。每个 dsh 实例只能看到自己的工作区，
+         其余路径在实例内不存在。<code>${esc(health.sandbox_detail)}</code></div>`
+      : `<div class="banner bad"><b>⚠️ 沙箱不可用，已停止建号。</b>
+         当前若有实例在跑，它们能读写整台服务器的文件（包括其他部门的文件和明文初始密码）。
+         请先执行 <code>scripts/install-bubblewrap.sh</code>，再用
+         <code>scripts/preflight-sandbox.sh</code> 验证。<br><code>${esc(health.sandbox_detail)}</code></div>`;
+    USERS = data.users;
+    render();
+  } catch (e) {
+    $('#banner').innerHTML = `<div class="banner bad">加载失败：${esc(e.message)}</div>`;
+    $('#rows').innerHTML = `<tr><td colspan="8" class="empty">${esc(e.message)}</td></tr>`;
+  }
+}
+
+function render() {
+  if (!USERS.length) {
+    $('#rows').innerHTML = `<tr><td colspan="8" class="empty">还没有员工，点右上角「新增员工」开始。</td></tr>`;
+    return;
+  }
+  $('#rows').innerHTML = USERS.map(u => {
+    const st = u.status || {};
+    const dots = Object.keys(LABELS).map(k =>
+      `<span class="dot ${st[k] ? 'on' : ''}" title="${LABELS[k]}：${st[k] ? '正常' : '缺失/异常'}"></span>`
+    ).join('');
+    const ws = (u.workspace || '').replace('/home/ubuntu/dsh-files', '');
+    return `<tr>
+      <td><code>${esc(u.username)}</code></td>
+      <td>${esc(u.name)}</td>
+      <td>${esc(u.department)}</td>
+      <td>${u.role === '主管' ? '<span class="tag lead">主管</span>' : '<span class="tag">员工</span>'}</td>
+      <td><code>${esc(u.port)}</code></td>
+      <td><div class="dots">${dots}</div></td>
+      <td class="muted"><code>${esc(ws)}</code></td>
+      <td><div class="acts">
+        <button class="sm" data-act="edit" data-u="${esc(u.username)}">编辑</button>
+        <button class="sm" data-act="pw" data-u="${esc(u.username)}">重置密码</button>
+        <button class="sm" data-act="toggle" data-u="${esc(u.username)}">${st.dsh ? '停用实例' : '启动实例'}</button>
+        <button class="sm danger" data-act="del" data-u="${esc(u.username)}">删除</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+/* ---------- 操作 ---------- */
+function showPassword(username, password, note) {
+  dialog({
+    title: `${username} 的初始密码`,
+    bodyHTML: `<div class="pw">${esc(password)}</div>
+      <div class="hint">${esc(note)}<br>关闭本窗口后<b>无法再次查看</b>，请立即复制并通过安全渠道交给本人。</div>`,
+    okText: '', });
+}
+
+const FORM = (u = {}) => `
+  ${u.username ? '' : `<label>用户名（登录名）
+    <input id="f-username" placeholder="wang_er" autocomplete="off">
+    <span class="hint">小写字母开头，只能用小写字母、数字、下划线，2–32 位。创建后不可更改。</span></label>`}
+  <label>姓名<input id="f-name" value="${esc(u.name || '')}" placeholder="王二"></label>
+  <label>部门<input id="f-department" value="${esc(u.department || '')}" placeholder="研发部"></label>
+  <label>角色
+    <select id="f-role">
+      <option value="员工" ${u.role === '员工' ? 'selected' : ''}>员工 — 只能进自己的目录，不能删除文件</option>
+      <option value="主管" ${u.role === '主管' ? 'selected' : ''}>主管 — 可管理整个部门，可删除文件</option>
+    </select>
+  </label>`;
+
+function val(id) { const el = $(id); return el ? el.value.trim() : undefined; }
+
+$('#new').onclick = () => dialog({
+  title: '新增员工',
+  bodyHTML: FORM() + `
+    <label>初始密码（留空自动生成 14 位随机密码）
+      <input id="f-password" placeholder="留空即自动生成" autocomplete="new-password"></label>
+    <div class="hint">将自动完成：Authelia 建号 → 建个人目录 → FileBrowser 权限 →
+      分配 dsh 端口 → nginx 路由 → 在沙箱内启动 dsh 实例。<br>
+      注意：建号会重启 Authelia，<b>所有在线用户会被登出一次</b>。</div>`,
+  okText: '创建',
+  onOk: async () => {
+    const res = await api('POST', '/admin/api/users', {
+      username: val('#f-username'), name: val('#f-name'),
+      department: val('#f-department'), role: val('#f-role'),
+      password: val('#f-password') || null,
+    });
+    await load();
+    setTimeout(() => showPassword(res.username, res.initial_password,
+      `dsh 端口 ${res.port}，工作区 ${res.workspace}。`), 150);
+  },
+});
+
+document.addEventListener('click', async ev => {
+  const btn = ev.target.closest('button[data-act]');
+  if (!btn) return;
+  const username = btn.dataset.u;
+  const u = USERS.find(x => x.username === username);
+
+  if (btn.dataset.act === 'edit') {
+    dialog({
+      title: `编辑 ${username}`, wide: true,
+      bodyHTML: FORM(u) + `
+        <label class="chk"><input type="checkbox" id="f-move" checked>
+          <span>改动姓名或部门时，同时把工作区目录及其中的文件一起迁移到新路径。
+          <b>不勾选</b>则只改权限、旧文件留在原地（会造成文件与账号脱节，一般应勾选）。</span></label>
+        <div class="hint">若路径发生变化，dsh 实例会自动以新工作区重启。</div>`,
+      okText: '保存',
+      onOk: async () => {
+        await api('PATCH', `/admin/api/users/${username}`, {
+          name: val('#f-name'), department: val('#f-department'),
+          role: val('#f-role'), move_files: $('#f-move').checked,
+        });
+        await load();
+      },
+    });
+  }
+
+  if (btn.dataset.act === 'pw') {
+    dialog({
+      title: `重置 ${username} 的密码`,
+      bodyHTML: `<label>新密码（留空自动生成）
+          <input id="f-password" placeholder="留空即自动生成" autocomplete="new-password"></label>
+        <div class="hint">重置会重启 Authelia，<b>所有在线用户会被登出一次</b>。</div>`,
+      okText: '重置',
+      onOk: async () => {
+        const res = await api('POST', `/admin/api/users/${username}/password`,
+                              {password: val('#f-password') || null});
+        setTimeout(() => showPassword(username, res.password, '密码已生效。'), 150);
+      },
+    });
+  }
+
+  if (btn.dataset.act === 'toggle') {
+    btn.disabled = true;
+    try { await api('POST', `/admin/api/users/${username}/instance`, {running: !u.status.dsh}); await load(); }
+    catch (e) { alert(e.message); btn.disabled = false; }
+  }
+
+  if (btn.dataset.act === 'del') {
+    dialog({
+      title: `删除员工 ${username}`, wide: true,
+      bodyHTML: `<div class="hint">将依次停止 dsh 实例、移除 Authelia 账号、移除 FileBrowser 用户、
+          清除 nginx 路由、删除实例状态目录。</div>
+        <label class="chk"><input type="checkbox" id="f-delfiles">
+          <span><b>同时永久删除该员工的工作区文件</b><br>
+          <code>${esc(u.workspace || '')}</code><br>
+          不勾选则文件保留在原处（离职归档的常见做法）。文件服务器没有回收站，删除不可恢复。</span></label>
+        <label>确认请输入用户名 <code>${esc(username)}</code>
+          <input id="f-confirm" autocomplete="off" placeholder="${esc(username)}"></label>`,
+      okText: '确认删除', okClass: 'danger',
+      onOk: async () => {
+        if (val('#f-confirm') !== username) throw new Error('用户名输入不匹配，未执行删除');
+        const del = $('#f-delfiles').checked ? '1' : '0';
+        const res = await api('DELETE', `/admin/api/users/${username}?delete_files=${del}`);
+        await load();
+        const failed = Object.entries(res.steps).filter(([, v]) => v !== 'ok');
+        if (failed.length) {
+          setTimeout(() => dialog({
+            title: '删除完成，但有步骤失败',
+            bodyHTML: `<div class="hint">以下步骤需要手工处理：</div><div class="err">` +
+              failed.map(([k, v]) => `${esc(k)}: ${esc(v)}`).join('\n') + `</div>`,
+            okText: '',
+          }), 150);
+        }
+      },
+    });
+  }
+});
+
+$('#refresh').onclick = load;
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>

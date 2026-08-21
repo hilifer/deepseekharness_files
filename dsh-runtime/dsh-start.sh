@@ -1,17 +1,26 @@
 #!/bin/bash
+# admin 主实例（端口 3080）start/stop/restart。
+# 与员工实例一样经 dsh-sandbox.sh 启动，工作区为整个 dsh-files 根。
 export PATH="$HOME/node/bin:$PATH"
-export DSH_HOME="$HOME/.local/share/dsh"
-PIDFILE="$HOME/dsh-runtime/dsh.pid"
-LOG="$HOME/dsh-runtime/dsh.log"
+DSH_ROOT="${DSH_ROOT:-$HOME}"; export DSH_ROOT
+PIDFILE="$DSH_ROOT/dsh-runtime/dsh.pid"
+LOG="$DSH_ROOT/dsh-runtime/dsh.log"
+SANDBOX="$DSH_ROOT/dsh-runtime/dsh-sandbox.sh"
 start() {
   if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     echo "dsh already running (pid $(cat "$PIDFILE"))"; return 0
   fi
-  setsid nohup env DSH_ALLOWED_ROOT="$HOME/dsh-files" "$HOME/node/bin/dsh" web --port 3080 --trusted-host 218.17.143.249:8099 > "$LOG" 2>&1 &
+  if ! "$SANDBOX" --check >/dev/null 2>&1; then
+    echo "沙箱不可用，拒绝启动 admin 实例。见 scripts/install-bubblewrap.sh"; return 1
+  fi
+  setsid nohup "$SANDBOX" admin 3080 "$DSH_ROOT/.local/share/dsh" "$DSH_ROOT/dsh-files" > "$LOG" 2>&1 &
   echo $! > "$PIDFILE"
   echo "dsh started (pid $(cat "$PIDFILE"))"
 }
 stop() {
-  if [ -f "$PIDFILE" ]; then kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; echo "dsh stopped"; fi
+  if [ -f "$PIDFILE" ]; then kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; fi
+  pkill -f "dsh web --port 3080 " 2>/dev/null
+  echo "dsh stopped"
 }
-case "$1" in start) start;; stop) stop;; restart) stop; sleep 1; start;; *) echo "usage: $0 start|stop|restart";; esac
+case "$1" in start) start;; stop) stop;; restart) stop; sleep 1; start;;
+  *) echo "usage: $0 start|stop|restart";; esac

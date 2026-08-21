@@ -25,6 +25,11 @@ auth:
   methods:
     proxy:
       enabled: true
+      # 这个头【名字本身是密钥】，由 scripts/init-secrets.sh 生成随机后缀并同步到
+      # nginx/conf/generated/fb-auth.conf。原因：dsh 沙箱与宿主共享网络命名空间，
+      # 能连上 127.0.0.1:18080；若沿用固定的 X-Forwarded-User，任何员工都能在自己的
+      # dsh 里 curl 伪造 admin 身份直调本 API 读写全公司文件，文件系统隔离等于白做。
+      # 沙箱内看不到本文件，因而拿不到头名。首次部署跑一次 init-secrets.sh 即可。
       header: "X-Forwarded-User"
       createUser: false
     password:

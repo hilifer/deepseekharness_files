@@ -6,7 +6,9 @@
 - **SSO**：Authelia 单点登录，proxy auth 透传用户身份，应用零密码暴露
 - **权限中心**：FileBrowser 按 scope 隔离部门/个人目录；主管可删本部门文件，员工只读+上传
 - **多租户 dsh**：每员工一个独立进程/端口/数据目录的 DeepSeek Harness 实例，nginx 按登录名路由
-- **目录选择器钳制**：自定义 cordis 插件把「新建工作区」限制在本人根目录内
+- **工作区硬隔离**：每个 dsh 实例跑在 bubblewrap 挂载命名空间里，工作区以外的路径
+  **在实例内根本不存在**——bash 用绝对路径也读不到
+- **图形化员工管理**：`/admin/` 后台完成增删改查，不用再敲命令
 
 ## 架构
 
@@ -22,11 +24,23 @@
 ## 目录结构
 
 ```
+├── admin/                     # 员工管理后台
+│   ├── core.py                # 生命周期引擎（增删改的唯一实现）
+│   ├── app.py                 # JSON API + 静态托管（仅绑 127.0.0.1）
+│   ├── cli.py                 # 命令行入口，与后台共用 core.py
+│   ├── admin-start.sh
+│   └── static/index.html      # 管理界面
+├── tests/                     # core.py / app.py 单元与接口测试（37 项）
 ├── scripts/
-│   ├── provision-user.sh      # 一键建号（Authelia+目录+FileBrowser+dsh 实例+nginx 路由）
+│   ├── provision-user.sh      # 建号（cli.py 的薄包装，保持原 CLI 兼容）
+│   ├── deprovision-user.sh    # 离职销号（原先只有手工步骤）
+│   ├── init-secrets.sh        # 生成 nginx 注入的共享密钥（幂等）
+│   ├── install-bubblewrap.sh  # 无 root 安装 bwrap（解包 deb，同 nginx 的装法）
+│   ├── preflight-sandbox.sh   # 隔离验收：实测工作区以外到底碰不碰得到
 │   └── fb-start.sh            # FileBrowser 启动脚本
 ├── dsh-runtime/
 │   ├── start-all.sh           # 全栈幂等启动入口（容器 entrypoint 调用）
+│   ├── dsh-sandbox.sh         # bubblewrap 沙箱启动器（所有实例都经它启动）
 │   └── dsh-start.sh           # admin 主实例启动
 ├── dsh-auth/
 │   ├── authelia-start.sh
@@ -46,18 +60,43 @@
 ## 快速开始
 
 ```bash
+# 0. 首次部署：安装沙箱并验收隔离（沙箱不可用时会拒绝启动实例、拒绝建号）
+./scripts/install-bubblewrap.sh
+./scripts/preflight-sandbox.sh        # 逐项实测，全绿才算数
+
 # 1. 全栈启动（幂等，可重复执行；建议加入容器 entrypoint）
 ./dsh-runtime/start-all.sh
 
-# 2. 新员工建号（自动完成 Authelia 建号、目录创建、FileBrowser 权限、
-#    端口分配、nginx 路由、dsh 实例启动）
+# 2. 新员工建号 —— 推荐直接用管理后台 https://<IP>:8099/admin/
+#    命令行等价物（与后台同一套逻辑）：
 INIT_PW='初始密码' ./scripts/provision-user.sh wang_er 研发部 员工 王二
+./scripts/deprovision-user.sh wang_er          # 离职（默认保留文件）
 
 # 3. 访问
+#    https://<IP>:8099/admin/          员工管理后台（仅 admin）
 #    https://<IP>:8099/files/          文件服务器
 #    https://<IP>:8099/                个人 dsh 工作台
 #    https://<IP>:9091/                登录门户
 ```
+
+## 员工管理后台
+
+`https://<IP>:8099/admin/`，经 Authelia 鉴权，只有管理员白名单里的账号能进
+（`ADMIN_USERS` 环境变量，默认 `admin`）。
+
+- **新增**：填用户名/姓名/部门/角色，一键完成 Authelia 建号、建目录、
+  FileBrowser 权限、端口分配、nginx 路由、沙箱内启动实例
+- **编辑**：改姓名/部门/角色。改部门会连带迁移工作区文件、更新 FileBrowser
+  scope、以新工作区重启实例
+- **删除**：停实例 + 清四个子系统 + 删实例状态；工作区文件默认保留，
+  可勾选一并永久删除（需输入用户名二次确认）
+- **同步状态**：每行五个圆点显示该用户在
+  Authelia / nginx / FileBrowser / dsh 实例 / 工作区目录 五处是否一致，
+  有人手工改过配置就会变红
+
+鉴权是两道：nginx 注入的 `X-Admin-Token` 共享密钥 + Authelia 的 `Remote-User`
+必须在管理员白名单里。前者是为了防住沙箱内的 dsh——它能连上 `127.0.0.1:19200`，
+但读不到宿主上的密钥文件。
 
 ## 关键实现要点（踩坑记录）
 
@@ -76,7 +115,40 @@ INIT_PW='初始密码' ./scripts/provision-user.sh wang_er 研发部 员工 王�
 ## 安全说明
 
 - 所有密钥/密码哈希/明文初始密码/TLS 私钥均不入库；配置以 `.example` 模板提供
-- 后端服务全部绑定 127.0.0.1，仅 nginx 监听公网端口
-- 目录选择器钳制是 UX 层隔离；如需内核级强制请启用 dsh 的 bash/fs 沙箱（bwrap/Landlock）
+- 后端服务全部绑定 127.0.0.1，仅 nginx 监听公网端口。**注意**：dsh 自身的监听地址
+  未显式指定，首次部署请用 `ss -ltnp | grep -E '3080|1310'` 确认是 `127.0.0.1` 而非
+  `0.0.0.0`——若是后者，直连实例端口可完全绕过 SSO
+- 用户名/姓名/部门经白名单校验后才写入 YAML、nginx 配置和文件路径
+
+### 工作区隔离（两层）
+
+| 层 | 机制 | 挡得住什么 |
+|----|------|-----------|
+| 内核 | bubblewrap 挂载命名空间（`dsh-runtime/dsh-sandbox.sh`） | 一切文件访问。工作区以外的路径在实例内不存在，bash 用绝对路径也读不到 |
+| UX | 目录选择器钳制插件（`dsh-plugin-clamped-picker`） | 选择器默认开在根目录、面包屑不显示上层 |
+
+沙箱内可见的全部内容：系统运行时（只读）、node+dsh 程序（只读）、共享插件（只读）、
+本人 DSH_HOME（读写）、本人工作区（读写）、`/proc` `/dev` 私有 `/tmp`。
+`dsh-auth/`（含全员明文初始密码）、`nginx/certs/`（TLS 私钥）、`filebrowser/`
+（权限库）、`admin/`（后台代码与 token）、其他部门与其他员工的目录**均不存在**。
+
+沙箱不可用时 `start-all.sh` 拒绝启动任何实例、管理后台拒绝建号——宁可服务不可用，
+也不退回无隔离运行。排障可用 `DSH_ALLOW_UNCONFINED=1` 显式放行（会大声告警）。
+
+用 `./scripts/preflight-sandbox.sh` 实测验收，它不看配置写了什么，只看实际能不能读到。
+
+### 已知残留风险
+
+沙箱与宿主**共享网络命名空间**（dsh 需要出网调模型 API），所以实例仍能连到
+`127.0.0.1` 上的服务。已封堵的：
+
+- FileBrowser API —— 代理认证头的**名字**改成了随机密钥，沙箱内读不到配置故拿不到
+- 管理后台 API —— 要求 nginx 注入的 `X-Admin-Token`
+
+**未封堵**：员工 A 的实例可以直连员工 B 的 dsh 端口（`127.0.0.1:1310x`），
+从而驱动 B 的 agent 读写 B 的工作区。dsh 本身对入站请求不做身份校验，
+路由完全靠 nginx 的 `map $user`。完整修复需要给每个实例独立的网络命名空间
+（`pasta`/`slirp4netns` 提供出网 + 入站转发），详见 OPS.md。
+`preflight-sandbox.sh` 的第 4 节会把这项的实际状态测出来。
 
 详见 [OPS.md](OPS.md)。

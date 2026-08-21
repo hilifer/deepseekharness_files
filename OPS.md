@@ -9,6 +9,10 @@ https://218.17.143.249:8099/          ← 公网入口（需云安全组放行 8
 https://192.168.1.225:9091/           ← Authelia 登录门户
 ```
 
+```
+https://192.168.1.225:8099/admin/     ← 员工管理后台（仅 admin）
+```
+
 **重要**：
 - 必须用 `https://`（nginx 只在 TLS 端口监听，http 会返回 400 "plain HTTP request sent to HTTPS port"）
 - 公网 IP `218.17.143.249` 是云 NAT 地址，不绑在本机网卡上——**在服务器本机浏览器里访问公网地址永远连不通**，本机请用 `https://127.0.0.1:8099` 或 `https://192.168.1.225:8099`
@@ -27,39 +31,55 @@ https://192.168.1.225:9091/           ← Authelia 登录门户
 /home/ubuntu/dsh-runtime/start-all.sh   # 幂等，可重复执行
 ```
 
-### 2. 新员工入职
+### 2. 员工增删改 —— 优先用管理后台
+
+**https://192.168.1.225:8099/admin/** （仅 admin 可进）
+
+新增 / 编辑 / 重置密码 / 删除 / 启停实例都在界面上完成，每行还会显示该员工在
+Authelia、nginx、FileBrowser、dsh 实例、工作区目录五处的同步状态。
+
+命令行等价物（与后台共用 `admin/core.py`，不存在第二套逻辑）：
+
 ```bash
-# 用法：provision-user.sh <拼音用户名> <中文名> <部门> <角色>
-# 角色：主管=可删部门文件，员工=不可删除
-/home/ubuntu/scripts/provision-user.sh wang_er 王二 研发部 员工
-# 输出：dsh 端口、初始密码（见 initial-credentials.txt）
+# 新增。注意参数顺序是 <用户名> <部门> <角色> [姓名]
+/home/ubuntu/scripts/provision-user.sh wang_er 研发部 员工 王二
+INIT_PW='指定初始密码' /home/ubuntu/scripts/provision-user.sh wang_er 研发部 员工 王二
+
+# 离职销号（停实例 + 清四个子系统；工作区文件默认保留）
+/home/ubuntu/scripts/deprovision-user.sh wang_er
+/home/ubuntu/scripts/deprovision-user.sh wang_er --delete-files   # 连文件一起永久删除
+
+# 改部门/角色/姓名（改路径会连带迁移文件并重启实例）
+python3 /home/ubuntu/admin/cli.py update wang_er --department 市场部
+python3 /home/ubuntu/admin/cli.py update wang_er --role 主管
+
+# 重置密码
+python3 /home/ubuntu/admin/cli.py passwd wang_er
+
+# 查看所有人及同步状态
+python3 /home/ubuntu/admin/cli.py list
 ```
 
-### 3. 员工离职（禁用账号）
-```bash
-# 方式 A：停用 dsh 实例
-pkill -f "dsh web --port <端口>"
-# 方式 B：在 Authelia 中删除账号
-# 编辑 /home/ubuntu/dsh-auth/config/users_database.yml，删除对应行
-# 重启 authelia: /home/ubuntu/dsh-auth/authelia-start.sh restart
-# 同时更新 /home/ubuntu/dsh-runtime/start-all.sh 或 ports.json 移除该用户
-```
+**重要提醒**：建号和改密码都会重启 Authelia，而会话存在内存里（未配 redis），
+所以**每次操作都会把所有在线用户登出一次**。批量建号请一次做完，或安排在非工作时段。
 
-### 4. 密码重置
+### 3. 手工修复（后台不可用时的兜底）
+
 ```bash
-# 生成 argon2 哈希
-/home/ubuntu/dsh-auth/authelia crypto hash generate argon2 --password '新密码'
-# 编辑 users_database.yml，替换对应行的 password 字段
-# 验证配置
-/home/ubuntu/dsh-auth/authelia --config /home/ubuntu/dsh-auth/config/configuration.yml validate-config
-# 重启（注意：会清空所有已登录会话）
-/home/ubuntu/dsh-auth/authelia-start.sh restart
+# 登记表：/home/ubuntu/dsh-users/registry.json（权威来源，ports.json 由它同步生成）
+# 手工改过 nginx / users_database.yml 后，让路由与登记表重新对齐：
+python3 /home/ubuntu/admin/cli.py sync-nginx
+# users_database.yml 每次写入前自动备份为 users_database.yml.bak.<时间戳>（保留最近 10 份）
 ```
 
 ### 5. 检查服务状态
 ```bash
+# 全员同步状态一览（推荐）
+python3 /home/ubuntu/admin/cli.py list
+# 隔离验收
+/home/ubuntu/scripts/preflight-sandbox.sh
 # 各端口健康检查
-for port in 3080 9091 8099 18080 13101 13102 13103; do
+for port in 3080 9091 8099 18080 19200 13101 13102 13103; do
   curl -sk -o /dev/null -w ":$port -> %{http_code}\n" --max-time 5 "http://127.0.0.1:$port/"
 done
 # 查看进程
@@ -106,24 +126,86 @@ v1.5.2 版本无内置回收站。主管删除部门文件为**永久删除**（
 | TLS 证书 | 自签，`/home/ubuntu/nginx/certs/dsh.crt`/`dsh.key` |
 | 配置文件 | `/home/ubuntu/nginx/conf/`, `/home/ubuntu/dsh-auth/config/`, `/home/ubuntu/filebrowser/config.yaml` |
 | 日志位置 | `~/nginx/logs/`, `~/dsh-auth/authelia.log`, `~/filebrowser/logs/`, `~/dsh-users/<user>/dsh.log` |
-| 端口分配 | `/home/ubuntu/dsh-users/ports.json`（13101 起始递增） |
-| 账号密码 | `/home/ubuntu/dsh-auth/initial-credentials.txt`（600 权限） |
+| 员工登记表 | `/home/ubuntu/dsh-users/registry.json`（权威来源；`ports.json` 由它同步生成） |
+| 端口分配 | 13101 起始递增，由 `admin/core.py` 分配 |
+| 账号密码 | 初始密码只在建号时显示一次，不再落盘（旧的 `initial-credentials.txt` 若还在，建议删除） |
+| 管理后台 | `https://<IP>:8099/admin/`，日志 `~/admin/admin.log`，审计 `~/admin/audit.log` |
+| 共享密钥 | `~/admin/.admin-token`、`~/nginx/conf/generated/`（均 600，不入库） |
 | 操作手册 | 本文件 `/home/ubuntu/scripts/OPS.md` |
 
-## 目录选择器钳制（多租户隔离）
+## 工作区隔离
 
-dsh 的「新建工作区」目录选择器默认可浏览整个文件系统。本部署通过自定义插件
-`~/.local/share/dsh/profiles/web/clamped-picker/index.mjs` 将其钳制到每实例自己的根目录：
+分两层，内核层是真边界，UX 层只管好看。
 
-- 机制：patch 层禁用 stock `-auto` 选择器，挂载 `BrowseDirectoryPicker` 子类；
-  允许根目录来自实例进程的 `DSH_ALLOWED_ROOT` 环境变量（start-all.sh 从各用户
-  `storages/workspace.json` 的首个工作区路径自动推导；dsh-start.sh 为 admin 固定
-  注入 `~/dsh-files`；provision-user.sh 为新用户注入其个人目录）。
-- 效果：选择器默认打开即根目录、面包屑不显示根目录之上层级、越界路径返回
-  `directory-unreadable` 错误。
-- 边界：这是 UX 层钳制。若需内核级强制（防 API 直调 `workspace.create`），
-  需另行启用 dsh 的 bash/fs 沙箱（bwrap/Landlock），当前未启用。
-- 注意：profiles 目录为全体实例共享，改动 patch 文件影响所有实例；改后需重启实例生效。
+### 第一层（内核）：bubblewrap 挂载命名空间
+
+所有 dsh 实例（含 admin）都经 `dsh-runtime/dsh-sandbox.sh` 启动。工作区以外的路径
+**在实例内根本不存在**——不是「没权限」，是那个 inode 不在这个 mount namespace 里，
+所以 dsh 的 bash 工具用绝对路径也读不到。
+
+沙箱内可见的全部内容：
+
+| 挂载 | 内容 |
+|------|------|
+| 只读 | `/usr /bin /sbin /lib* /etc`、`node/`（含 dsh 本体）、共享 `profiles/` |
+| 读写 | 本人 `dsh-users/<user>/`、本人工作区 |
+| 其他 | `/proc`、`/dev`、私有 `/tmp` |
+
+**不存在**：`dsh-auth/`（全员明文初始密码、用户库）、`nginx/certs/`（TLS 私钥）、
+`filebrowser/`（权限库）、`admin/`（后台代码与 token）、`dsh-users/registry.json`、
+其他部门与其他员工的目录。另外 `--unshare-pid` 使实例内 `ps` 看不到宿主进程，
+顺带堵住了 `authelia crypto hash --password` 在命令行上短暂暴露密码的问题。
+
+共享 `profiles/` 挂成**只读**：此前它对所有实例可写，任何员工都能改写
+`clamped-picker/index.mjs` 影响全体。
+
+```bash
+/home/ubuntu/scripts/install-bubblewrap.sh    # 无 root 安装（解包 deb）
+/home/ubuntu/dsh-runtime/dsh-sandbox.sh --check
+/home/ubuntu/scripts/preflight-sandbox.sh     # 逐项实测验收
+```
+
+**fail-closed**：沙箱不可用时 `start-all.sh` 不启动任何实例、管理后台拒绝建号。
+排障可用 `DSH_ALLOW_UNCONFINED=1` 显式放行，会打出醒目告警。
+
+### 第二层（UX）：目录选择器钳制
+
+插件 `~/.local/share/dsh/profiles/web/clamped-picker/index.mjs` 让选择器默认开在
+根目录、面包屑不显示上层、越界返回 `directory-unreadable`。允许根来自实例进程的
+`DSH_ALLOWED_ROOT`，由 `dsh-sandbox.sh` 从登记表传入。
+
+注意这一层**只覆盖选择器的 list/createDirectory**，dsh 的 bash 和文件读写工具
+完全不经过它——所以它从来不是安全边界，真正的边界是第一层。
+
+> 允许根的来源已从 `storages/workspace.json` 改为 `dsh-users/registry.json`。
+> 前者是实例自己（也就是被约束方）在写的：用户删光工作区就能让推导结果为空，
+> 进而拿到不设限的实例。约束的依据不能由被约束方提供。
+
+## 残留风险：实例间的网络可达性
+
+沙箱与宿主**共享网络命名空间**（dsh 要出网调模型 API），所以实例仍能连
+`127.0.0.1` 上的服务。
+
+已封堵（靠「能连上 ≠ 能调用」）：
+
+| 目标 | 手段 |
+|------|------|
+| FileBrowser API `:18080` | 代理认证头的**名字**是随机密钥，配置在沙箱内不可见 |
+| 管理后台 API `:19200` | 要求 nginx 注入的 `X-Admin-Token`，密钥文件在沙箱内不可见 |
+
+密钥由 `scripts/init-secrets.sh` 生成（幂等，`start-all.sh` 会自动调用），
+落在 `nginx/conf/generated/`（600，已 gitignore）。轮换：删掉
+`admin/.admin-token` 和 `nginx/conf/generated/fb-auth.conf` 后重跑该脚本，
+再 `fb-start.sh restart` + `nginx-start.sh reload`。
+
+**未封堵**：员工 A 的实例可直连员工 B 的 dsh 端口 `127.0.0.1:1310x`，驱动 B 的
+agent 读写 B 的工作区。dsh 对入站请求不做身份校验，路由完全靠 nginx 的 `map $user`。
+
+完整修复需要给每个实例独立网络命名空间：`--unshare-net` 后用 `pasta`（passt 包）
+提供出网 + 入站端口转发，并加 `--no-map-gw` 断掉经网关回连宿主的路径。
+本仓库没有默认启用，因为它无法在开发环境验证，贸然上线会让全部实例起不来。
+上线前请先在单个实例上验证 dsh 的出网和 nginx 的入站都正常。
+`preflight-sandbox.sh` 第 4 节会把这项的实际状态测出来。
 
 ## 容器入口点
 
