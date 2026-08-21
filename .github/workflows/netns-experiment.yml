@@ -38,10 +38,11 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      - name: pasta 全部选项（上轮 grep 太窄，漏了 --no-splice）
-        run: pasta --help 2>&1 || true
+      - name: 安装 socat
+        run: sudo apt-get install -y socat
 
-      - name: 实验二 —— --no-splice 能否封住回环，以及 DNS 会不会被连带打断
+      - name: |
+          实验三 —— 结论性方案：私有 netns（pasta 出网）+ unix socket 入站
         run: |
           set -u
           pass=0; fail=0
@@ -49,6 +50,14 @@ jobs:
           bad() { printf '  ❌ %-46s %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
           inf() { printf '  ·  %-46s %s\n' "$1" "${2:-}"; }
 
+          # 实验二的结论：pasta 会把命名空间回环转发到宿主回环，--no-splice 无效。
+          # 所以不要在宿主回环上留下 dsh 的端口 —— 端口不存在，就没什么可连的。
+          # 入站改走 unix socket（nginx 原生支持 proxy_pass http://unix:...）。
+          SOCKDIR="$RUNNER_TEMP/socks"; mkdir -p "$SOCKDIR"
+          RESOLV="$RUNNER_TEMP/resolv.conf"; echo "nameserver 10.0.2.3" > "$RESOLV"
+          HOSTIP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+
+          # 宿主上的「FileBrowser」，用来观察回环 splice 是否仍然存在
           python3 -c "
           import http.server
           class H(http.server.BaseHTTPRequestHandler):
@@ -58,95 +67,107 @@ jobs:
           http.server.HTTPServer(('127.0.0.1',18080),H).serve_forever()" &
           HOSTSVC=$!
           sleep 1
-          echo "宿主 resolv.conf:"; sed 's/^/     /' /etc/resolv.conf
-          echo
 
-          # 上一轮的教训：curl 连不上时自己输出 000，再 || echo 000 会拼成 000000
-          PROBE='
-          code() { curl -s --max-time 4 -o /dev/null -w "%{http_code}" "$@" 2>/dev/null; }
-          echo "LOOP=$(code http://127.0.0.1:18080/)"
-          GW=$(ip route show default 2>/dev/null | awk "{print \$3}" | head -1)
-          echo "GWADDR=$GW"; echo "GWSVC=$(code http://$GW:18080/)"
-          echo "HOSTIP_SVC=$(code http://$HOSTIP:18080/)"
-          echo "DNS=$(getent hosts github.com >/dev/null 2>&1 && echo YES || echo NO)"
-          echo "HTTPS=$(code https://github.com)"
-          echo "RESOLV=$(tr "\n" ";" < /etc/resolv.conf | head -c 120)"
-          '
-          HOSTIP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
-          echo "宿主 eth0 地址: $HOSTIP"; echo
-
-          run() { timeout 60 env HOSTIP="$HOSTIP" pasta "$@" -- bash -c "$PROBE" 2>&1 || echo RUNFAIL; }
-          rep() { echo "$1" | sed -n "s/^$2=//p" | head -1; }
-
-          for variant in "基线(仅 --no-map-gw)|--config-net --no-map-gw" \
-                         "加 --no-splice|--config-net --no-map-gw --no-splice"; do
-            label="${variant%%|*}"; flags="${variant#*|}"
-            echo "=== $label  [pasta $flags] ==="
-            # shellcheck disable=SC2086
-            OUT=$(run $flags)
-            echo "$OUT" | grep -E '^(LOOP|GWSVC|HOSTIP_SVC|DNS|HTTPS|RESOLV|RUNFAIL)=' | sed 's/^/     /'
-            L=$(rep "$OUT" LOOP); D=$(rep "$OUT" DNS); H=$(rep "$OUT" HTTPS)
-            G=$(rep "$OUT" GWSVC); I=$(rep "$OUT" HOSTIP_SVC)
-            [ "$L" = "000" ] && ok "[$label] 宿主回环不可达" || bad "[$label] 宿主回环可达" "HTTP $L"
-            [ "$G" = "000" ] && ok "[$label] 经网关回连被阻断" || bad "[$label] 经网关可回连" "HTTP $G"
-            [ "$I" = "000" ] && ok "[$label] 经宿主 eth0 地址不可达" || bad "[$label] 经宿主 eth0 可达" "HTTP $I"
-            [ "$D" = "YES" ] && ok "[$label] DNS 可用" || bad "[$label] DNS 不可用" "dsh 调不了模型 API"
-            case "$H" in 200|301|302) ok "[$label] 出网 HTTPS 可用" "HTTP $H";;
-                         *) bad "[$label] 出网 HTTPS 不可用" "HTTP $H";; esac
-            echo
-          done
-
-          echo "=== 若 --no-splice 打断了 DNS：用 pasta 自带的 DNS 转发器补回来 ==="
-          mkdir -p "$RUNNER_TEMP/ns"
-          echo "nameserver 10.0.2.3" > "$RUNNER_TEMP/ns/resolv.conf"
-          OUT=$(timeout 60 env HOSTIP="$HOSTIP" pasta --config-net --no-map-gw --no-splice \
-                  --dns-forward 10.0.2.3 -- \
-                  bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
-                        --ro-bind "$RUNNER_TEMP/ns/resolv.conf" /etc/resolv.conf \
-                        --unshare-user --unshare-ipc --unshare-pid --unshare-uts --share-net \
-                        -- bash -c "$PROBE" 2>&1 || echo RUNFAIL)
-          echo "$OUT" | grep -E '^(LOOP|GWSVC|HOSTIP_SVC|DNS|HTTPS|RESOLV|RUNFAIL)=' | sed 's/^/     /'
-          L=$(rep "$OUT" LOOP); D=$(rep "$OUT" DNS); H=$(rep "$OUT" HTTPS)
-          [ "$L" = "000" ] && ok "[完整形态] 宿主回环不可达" || bad "[完整形态] 宿主回环可达" "HTTP $L"
-          [ "$D" = "YES" ] && ok "[完整形态] DNS 可用（经 --dns-forward）" || bad "[完整形态] DNS 不可用"
-          case "$H" in 200|301|302) ok "[完整形态] 出网 HTTPS 可用" "HTTP $H";;
-                       *) bad "[完整形态] 出网 HTTPS 不可用" "HTTP $H";; esac
-          echo
-
-          echo "=== 入站转发 + 实例间隔离（最关键） ==="
-          # 员工 B 的实例：只绑宿主回环，nginx 能连，外部网卡连不到
-          timeout 60 pasta --config-net --no-map-gw --no-splice -t 127.0.0.1/13101 -- bash -c '
-            python3 -c "
-          import http.server
+          cat > "$RUNNER_TEMP/inst.sh" <<'INNER'
+          # 沙箱内：socat 把 bind-mount 进来的 unix socket 桥到本 netns 的 13101，
+          # 然后起「dsh」。13101 只存在于本实例私有的网络命名空间里。
+          socat UNIX-LISTEN:"$SOCK",fork,mode=600 TCP:127.0.0.1:13101 &
+          exec python3 -c "
+          import http.server, os
+          who = os.environ['WHO']
           class H(http.server.BaseHTTPRequestHandler):
               def do_GET(s):
-                  s.send_response(200); s.end_headers(); s.wfile.write(b\"dsh-B\")
+                  s.send_response(200); s.end_headers(); s.wfile.write(f'dsh-{who}'.encode())
               def log_message(*a): pass
-          http.server.HTTPServer((\"0.0.0.0\",13101),H).serve_forever()" ' &
-          PB=$!
-          sleep 7
-          FROM_HOST=$(curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
-          [ "$FROM_HOST" = "dsh-B" ] && ok "nginx（宿主）能连到 B 的实例" \
-                                     || bad "宿主连不到 B 的实例" "收到 '${FROM_HOST:-空}'"
-          FROM_EXT=$(curl -s --max-time 5 "http://$HOSTIP:13101/" 2>/dev/null || echo "")
-          [ -z "$FROM_EXT" ] && ok "B 的实例未暴露在宿主外部网卡上" \
-                             || bad "B 的实例暴露在 $HOSTIP:13101" "收到 '$FROM_EXT'"
-          # 员工 A：另一个沙箱，试图连 B
-          A1=$(timeout 30 pasta --config-net --no-map-gw --no-splice -- \
-                 curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
-          A2=$(timeout 30 env HOSTIP="$HOSTIP" pasta --config-net --no-map-gw --no-splice -- \
-                 bash -c 'curl -s --max-time 5 "http://$HOSTIP:13101/" 2>/dev/null' || echo "")
-          inf "A 经 127.0.0.1 连 B" "收到 '${A1:-空}'"
-          inf "A 经 $HOSTIP 连 B" "收到 '${A2:-空}'"
-          if [ -z "$A1" ] && [ -z "$A2" ]; then
-            ok "员工 A 无法连到员工 B 的实例" "★ 残留风险已封堵"
-          else
-            bad "员工 A 仍能连到员工 B 的实例" "★ 未封堵"
-          fi
-          kill $PB $HOSTSVC 2>/dev/null || true
+          http.server.HTTPServer(('127.0.0.1',13101),H).serve_forever()"
+INNER
 
+          launch() { # $1=name
+            local who=$1
+            timeout 90 pasta --config-net --no-map-gw --dns-forward 10.0.2.3 -- \
+              bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
+                    --ro-bind "$RESOLV" /etc/resolv.conf \
+                    --bind "$SOCKDIR" "$SOCKDIR" \
+                    --setenv SOCK "$SOCKDIR/$who.sock" --setenv WHO "$who" \
+                    --unshare-user --unshare-ipc --unshare-pid --unshare-uts --share-net \
+                    -- bash "$RUNNER_TEMP/inst.sh" &
+          }
+
+          echo "=== 起两个实例（员工 B 与员工 A），各自私有 netns ==="
+          launch B; PB=$!
+          launch A; PA=$!
+          sleep 8
+          ls -l "$SOCKDIR" | sed 's/^/     /'
+          echo
+
+          echo "=== 1. nginx（宿主）经 unix socket 能否连到实例 ==="
+          FROM_HOST=$(curl -s --max-time 5 --unix-socket "$SOCKDIR/B.sock" http://x/ 2>/dev/null || echo "")
+          [ "$FROM_HOST" = "dsh-B" ] && ok "宿主经 unix socket 连到 B" "nginx -> dsh 这条路通" \
+                                     || bad "宿主经 unix socket 连不到 B" "收到 '${FROM_HOST:-空}'"
+
+          echo
+          echo "=== 2. B 的实例是否还在宿主回环/网卡上留了端口 ==="
+          P1=$(curl -s --max-time 4 -o /dev/null -w '%{http_code}' http://127.0.0.1:13101/ 2>/dev/null)
+          P2=$(curl -s --max-time 4 -o /dev/null -w '%{http_code}' "http://$HOSTIP:13101/" 2>/dev/null)
+          [ "$P1" = "000" ] && ok "宿主回环上无 13101 端口" || bad "宿主回环上仍有 13101" "HTTP $P1"
+          [ "$P2" = "000" ] && ok "宿主外部网卡上无 13101 端口" || bad "宿主 eth0 上仍有 13101" "HTTP $P2"
+          inf "宿主 ss 结果" "$(ss -ltn 2>/dev/null | grep -c ':13101' || echo 0) 个 13101 监听"
+
+          echo
+          echo "=== 3. ★ 员工 A 能否连到员工 B 的实例 ==="
+          A_LOOP=$(timeout 30 pasta --config-net --no-map-gw -- \
+                     curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
+          A_EXT=$(timeout 30 env HOSTIP="$HOSTIP" pasta --config-net --no-map-gw -- \
+                     bash -c 'curl -s --max-time 5 "http://$HOSTIP:13101/" 2>/dev/null' || echo "")
+          A_SOCK=$(timeout 30 pasta --config-net --no-map-gw -- \
+                     bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
+                           --unshare-user --share-net -- \
+                     curl -s --max-time 5 --unix-socket "$SOCKDIR/B.sock" http://x/ 2>/dev/null || echo "")
+          inf "A 经 127.0.0.1:13101" "'${A_LOOP:-空}'"
+          inf "A 经 $HOSTIP:13101" "'${A_EXT:-空}'"
+          inf "A 经 B 的 unix socket" "'${A_SOCK:-空}'（socket 未挂进 A 的沙箱）"
+          if [ -z "$A_LOOP" ] && [ -z "$A_EXT" ] && [ -z "$A_SOCK" ]; then
+            ok "员工 A 无法连到员工 B 的实例" "★★ 残留风险已封堵"
+          else
+            bad "员工 A 仍能连到员工 B" "★★ 未封堵"
+          fi
+
+          echo
+          echo "=== 4. 沙箱内出网是否仍然可用（dsh 要调模型 API） ==="
+          NETOUT=$(timeout 60 pasta --config-net --no-map-gw --dns-forward 10.0.2.3 -- \
+                    bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
+                          --ro-bind "$RESOLV" /etc/resolv.conf --unshare-user --share-net -- \
+                    bash -c 'echo "DNS=$(getent hosts github.com >/dev/null 2>&1 && echo YES || echo NO)";
+                             echo "HTTPS=$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://github.com 2>/dev/null)"' 2>&1)
+          echo "$NETOUT" | grep -E '^(DNS|HTTPS)=' | sed 's/^/     /'
+          echo "$NETOUT" | grep -q 'DNS=YES' && ok "DNS 可用" || bad "DNS 不可用"
+          echo "$NETOUT" | grep -qE 'HTTPS=(200|301|302)' && ok "出网 HTTPS 可用" || bad "出网 HTTPS 不可用"
+
+          echo
+          echo "=== 5. nginx 真的能 proxy_pass 到 unix socket 吗 ==="
+          sudo apt-get install -y -qq nginx-light >/dev/null 2>&1 || true
+          cat > "$RUNNER_TEMP/ng.conf" <<NGEOF
+          events {}
+          http {
+            access_log off;
+            server {
+              listen 18099;
+              location / { proxy_pass http://unix:$SOCKDIR/B.sock:/; }
+            }
+          }
+NGEOF
+          sudo nginx -c "$RUNNER_TEMP/ng.conf" -g "pid $RUNNER_TEMP/ng.pid; error_log $RUNNER_TEMP/ng.err;" 2>&1 | sed 's/^/     /' || true
+          sleep 2
+          VIA_NGINX=$(curl -s --max-time 5 http://127.0.0.1:18099/ 2>/dev/null || echo "")
+          [ "$VIA_NGINX" = "dsh-B" ] && ok "nginx proxy_pass 到 unix socket 成功" "收到 '$VIA_NGINX'" \
+                                     || bad "nginx 经 unix socket 失败" "收到 '${VIA_NGINX:-空}' $(tail -2 "$RUNNER_TEMP/ng.err" 2>/dev/null | tr '\n' ' ')"
+          sudo nginx -s quit -c "$RUNNER_TEMP/ng.conf" 2>/dev/null || true
+
+          kill $PA $PB $HOSTSVC 2>/dev/null || true
           echo
           echo "================================================"
           printf '  通过 %d 项，失败 %d 项\n' "$pass" "$fail"
+          [ "$fail" -eq 0 ] && echo "  ★ 方案成立：私有 netns + unix socket 入站，可封掉实例间互连" \
+                            || echo "  方案仍有缺口，见上方 ❌"
           echo "================================================"
           exit 0
