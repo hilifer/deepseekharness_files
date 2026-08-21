@@ -27,6 +27,16 @@ jobs:
           sudo apt-get install -y bubblewrap
           bwrap --version
 
+      - name: 放开非特权 user namespace 限制
+        # Ubuntu 24.04 起 AppArmor 默认拦截非特权 userns，bwrap 会报
+        # "setting up uid map: Permission denied"。runner 有免密 sudo，
+        # 直接放开即可。目标服务器若也是 24.04+，同样会撞上这条，
+        # 处理办法见 OPS.md。
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: 确认沙箱在本 runner 上可用
         # 没这一步的话，隔离测试会被 skipUnless 静默跳过，CI 绿得毫无意义。
         run: |
@@ -59,6 +69,16 @@ jobs:
 
       - name: 安装 bubblewrap
         run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+
+      - name: 放开非特权 user namespace 限制
+        # Ubuntu 24.04 起 AppArmor 默认拦截非特权 userns，bwrap 会报
+        # "setting up uid map: Permission denied"。runner 有免密 sudo，
+        # 直接放开即可。目标服务器若也是 24.04+，同样会撞上这条，
+        # 处理办法见 OPS.md。
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - name: 搭一棵仿真部署树
         run: |

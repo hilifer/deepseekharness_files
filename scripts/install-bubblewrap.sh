@@ -51,9 +51,9 @@ if "$DSH_ROOT/dsh-runtime/dsh-sandbox.sh" --check; then
   echo "   2. 重启全栈让实例进沙箱: $DSH_ROOT/dsh-runtime/start-all.sh"
 else
   echo
-  echo "❌ bwrap 已就位但跑不起来，通常是内核/容器禁用了非特权 user namespace："
-  echo "   sysctl kernel.unprivileged_userns_clone   # 需为 1"
-  echo "   sysctl user.max_user_namespaces           # 需大于 0"
-  echo "   Docker 默认 seccomp 会拦 unshare(CLONE_NEWUSER)，需容器侧放开"
+  echo "❌ bwrap 已就位但跑不起来。上面 --check 的输出已定位到具体原因，按提示处理。"
+  echo "   最常见的一种：Ubuntu 24.04 起 AppArmor 默认拦截非特权 user namespace，"
+  echo "   报错为 'setting up uid map: Permission denied'，需在宿主机上放开 sysctl"
+  echo "   kernel.apparmor_restrict_unprivileged_userns=0（容器内改不了）。"
   exit 1
 fi

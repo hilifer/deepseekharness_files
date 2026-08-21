@@ -76,10 +76,31 @@ if [ "${1:-}" = "--check" ]; then
     log "沙箱可用: $out"; echo "$out"; exit 0
   else
     log "沙箱不可用: $out"
-    log "  MISSING -> 运行 scripts/install-bubblewrap.sh 安装（rootless 解包，无需 root）"
-    log "  BROKEN  -> 内核禁用了非特权 user namespace，检查:"
-    log "             sysctl kernel.unprivileged_userns_clone / user.max_user_namespaces"
-    log "             容器需允许 unshare(CLONE_NEWUSER)（Docker 默认 seccomp 可能拦截）"
+    case "$out" in
+      MISSING*)
+        log "  -> 运行 scripts/install-bubblewrap.sh 安装（rootless 解包，无需 root）"
+        ;;
+      BROKEN*)
+        log "  -> bwrap 在，但跑不起来。具体报错:"
+        # 这条必然失败（就是要看它的报错）；脚本开头有 set -e -o pipefail，
+        # 不加 || true 会在这里直接退出，后面的排障提示就永远打不出来。
+        { "${out#BROKEN }" --ro-bind / / --unshare-all --share-net true 2>&1 \
+          | sed 's/^/     /' >&2; } || true
+        aa=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+        if [ -r "$aa" ] && [ "$(cat "$aa")" = "1" ]; then
+          log "  -> 已定位原因：AppArmor 拦截了非特权 user namespace"
+          log "     （Ubuntu 24.04 起默认开启，报错为 'setting up uid map: Permission denied'）"
+          log "     临时放开: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+          log "     永久放开: echo 'kernel.apparmor_restrict_unprivileged_userns=0' \\"
+          log "                 | sudo tee /etc/sysctl.d/60-dsh-userns.conf && sudo sysctl --system"
+          log "     容器内无法改这个 sysctl，需在宿主机上设置。"
+        else
+          log "  -> 其他可能原因:"
+          log "     sysctl kernel.unprivileged_userns_clone / user.max_user_namespaces"
+          log "     Docker 默认 seccomp 会拦 unshare(CLONE_NEWUSER)，需容器侧放开"
+        fi
+        ;;
+    esac
     echo "$out"; exit 1
   fi
 fi

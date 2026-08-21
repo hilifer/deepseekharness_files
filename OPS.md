@@ -168,6 +168,25 @@ v1.5.2 版本无内置回收站。主管删除部门文件为**永久删除**（
 **fail-closed**：沙箱不可用时 `start-all.sh` 不启动任何实例、管理后台拒绝建号。
 排障可用 `DSH_ALLOW_UNCONFINED=1` 显式放行，会打出醒目告警。
 
+#### 排障：`bwrap: setting up uid map: Permission denied`
+
+最常见的一种失败，本项目的 CI 在 GitHub 的 ubuntu-24.04 runner 上实际撞到过。
+原因是 **Ubuntu 24.04 起 AppArmor 默认拦截非特权 user namespace**：
+
+```bash
+cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns   # 为 1 即被拦
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0            # 临时
+echo 'kernel.apparmor_restrict_unprivileged_userns=0' \
+  | sudo tee /etc/sysctl.d/60-dsh-userns.conf && sudo sysctl --system    # 永久
+```
+
+**注意这个 sysctl 在容器内改不了，必须在宿主机上设置**——本部署跑在 rootless
+容器里，如果宿主是 Ubuntu 24.04+ 且你拿不到宿主的 root，这条路走不通。
+那种情况下的替代方案是给每个员工建独立的 OS 账号，靠文件系统属主+700 权限
+做隔离（同样需要 root，但只需一次性配置）。
+
+`dsh-sandbox.sh --check` 会自动判别是这条还是别的原因，并打出对应的处理命令。
+
 ### 第二层（UX）：目录选择器钳制
 
 插件 `~/.local/share/dsh/profiles/web/clamped-picker/index.mjs` 让选择器默认开在
