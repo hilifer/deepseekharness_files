@@ -347,6 +347,24 @@ class TestSpaceSync(TempCase):
     def test_admin_space_is_whole_company(self):
         self.assertEqual(self.engine.admin_space(), self.cfg.files_root)
 
+    def test_startup_scripts_launch_admin_with_whole_company(self):
+        """光有 admin_space() 不够——启动脚本必须真的用这个路径。
+
+        「函数里定义一套、脚本里写死另一套」正是本项目此前空间漂移的成因，
+        所以这里直接盯住启动脚本。
+        """
+        repo = Path(__file__).resolve().parent.parent
+        for name in ("start-all.sh", "dsh-start.sh"):
+            text = (repo / "dsh-runtime" / name).read_text(encoding="utf-8")
+            admin_lines = [ln for ln in text.splitlines()
+                           if "admin" in ln and "3080" in ln and "dsh-files" in ln]
+            self.assertTrue(
+                admin_lines,
+                f"{name} 里没有以 dsh-files 为工作区拉起 admin 3080 实例的那一行")
+            self.assertTrue(
+                all("$DSH_ROOT/dsh-files" in ln for ln in admin_lines),
+                f"{name} 的 admin 实例工作区应为 $DSH_ROOT/dsh-files: {admin_lines}")
+
     def test_detects_drift_when_someone_edits_filebrowser_by_hand(self):
         """有人绕过后台、直接在 FileBrowser 上把 scope 改宽了，状态要能看出来。"""
         rec = self.engine.create_user("zhangsan", "张三", "研发部", "员工")
