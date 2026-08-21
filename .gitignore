@@ -1,0 +1,18 @@
+# 会话/工具元数据
+.omo/
+.codegraph
+
+# 密钥与凭据（绝不入库）
+**/users_database.yml
+**/initial-credentials.txt
+**/*.crt
+**/*.key
+**/configuration.yml
+
+# 运行数据与日志
+**/*.log
+**/*.pid
+**/data/
+**/storages/
+**/node_modules/
+ports.json

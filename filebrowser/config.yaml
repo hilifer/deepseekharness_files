@@ -1,0 +1,41 @@
+# FileBrowser Quantum v1.5.2-stable configuration
+# Company file server - proxy auth via Authelia, subpath /files
+# Schema verified from `filebrowser setup` default output (2026-08-20)
+# NOTE: port/listen/baseURL/externalUrl live under `server:`, NOT `http:`
+
+server:
+  database: /home/ubuntu/filebrowser/database.db
+  cacheDir: /home/ubuntu/filebrowser/cache
+  cacheDirCleanup: false
+  port: 18080
+  listen: "127.0.0.1"
+  baseURL: /files
+  externalUrl: "https://218.17.143.249:8099/files"
+  sources:
+    - path: /home/ubuntu/dsh-files
+      name: 公司文件
+  disableUpdateCheck: true
+  disableWebDAV: false
+  filesystem:
+    createFilePermission: "644"
+    createDirectoryPermission: "755"
+
+auth:
+  tokenExpirationHours: 2
+  methods:
+    proxy:
+      enabled: true
+      header: "X-Forwarded-User"
+      createUser: false
+    password:
+      enabled: false
+  adminUsername: admin
+  adminPassword: "CHANGE_ME_FIRST_BOOT"
+
+http:
+  trustedHeaders:
+    - X-Forwarded-Proto
+    - X-Forwarded-Host
+    - X-Forwarded-For
+    - X-Real-IP
+  disableRateLimit: false

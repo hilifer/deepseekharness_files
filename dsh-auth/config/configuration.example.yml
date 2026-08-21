@@ -1,0 +1,62 @@
+################################
+# Authelia v4.39 configuration (rootless, nginx terminates TLS on public ports)
+# authelia_url uses https:// scheme (required by 4.39) pointing at nginx TLS portal.
+################################
+server:
+  address: 'tcp://127.0.0.1:19091'
+  buffers:
+    read: 4096
+    write: 4096
+
+log:
+  level: info
+
+authentication_backend:
+  file:
+    path: /home/ubuntu/dsh-auth/config/users_database.yml
+
+access_control:
+  default_policy: deny
+  rules:
+    - domain: '218.17.143.249'
+      policy: one_factor
+    # 本机/局域网访问域（公网 IP 为云 NAT，不绑在本机网卡上，
+    # 本机只能通过 127.0.0.1 或局域网 IP 访问，必须放行这两个域）
+    - domain: '192.168.1.225'
+      policy: one_factor
+    - domain: '127.0.0.1'
+      policy: one_factor
+
+session:
+  name: authelia_session
+  secret: 'CHANGE_ME_SESSION_SECRET'
+  expiration: 8h
+  inactivity: 1h
+  cookies:
+    - domain: '218.17.143.249'
+      authelia_url: 'https://218.17.143.249:9091'
+      same_site: lax
+    - domain: '192.168.1.225'
+      authelia_url: 'https://192.168.1.225:9091'
+      same_site: lax
+    - domain: '127.0.0.1'
+      authelia_url: 'https://127.0.0.1:9091'
+      same_site: lax
+
+regulation:
+  max_retries: 5
+  find_time: 5m
+  ban_time: 15m
+
+storage:
+  local:
+    path: /home/ubuntu/dsh-auth/data/db.sqlite3
+  encryption_key: 'CHANGE_ME_ENCRYPTION_KEY'
+
+notifier:
+  filesystem:
+    filename: /home/ubuntu/dsh-auth/data/notification.txt
+
+identity_validation:
+  reset_password:
+    jwt_secret: 'CHANGE_ME_JWT_SECRET'
