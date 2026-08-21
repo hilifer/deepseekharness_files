@@ -38,26 +38,26 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      - name: 安装 socat
-        run: sudo apt-get install -y socat
+      - name: 安装 socat 与 nginx
+        run: sudo apt-get install -y socat nginx-light
 
-      - name: |
-          实验三 —— 结论性方案：私有 netns（pasta 出网）+ unix socket 入站
+      - name: 实验三 —— 私有 netns（pasta 出网）+ unix socket 入站
         run: |
           set -u
           pass=0; fail=0
-          ok()  { printf '  ✅ %-46s %s\n' "$1" "${2:-}"; pass=$((pass+1)); }
-          bad() { printf '  ❌ %-46s %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
-          inf() { printf '  ·  %-46s %s\n' "$1" "${2:-}"; }
+          ok()  { printf '  \xe2\x9c\x85 %-44s %s\n' "$1" "${2:-}"; pass=$((pass+1)); }
+          bad() { printf '  \xe2\x9d\x8c %-44s %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
+          inf() { printf '  .  %-44s %s\n' "$1" "${2:-}"; }
 
-          # 实验二的结论：pasta 会把命名空间回环转发到宿主回环，--no-splice 无效。
-          # 所以不要在宿主回环上留下 dsh 的端口 —— 端口不存在，就没什么可连的。
-          # 入站改走 unix socket（nginx 原生支持 proxy_pass http://unix:...）。
+          # 实验二结论：--no-splice 无效，pasta 仍把命名空间回环转发到宿主回环；
+          # 但网关与宿主 eth0 两条路都被堵死。既然只有【绑在宿主回环上】的服务
+          # 够得到，那就别在宿主回环上留 dsh 的端口 —— 端口不存在就无从转发。
+          # 入站改走 unix socket。
           SOCKDIR="$RUNNER_TEMP/socks"; mkdir -p "$SOCKDIR"
           RESOLV="$RUNNER_TEMP/resolv.conf"; echo "nameserver 10.0.2.3" > "$RESOLV"
           HOSTIP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+          echo "宿主 eth0: $HOSTIP"
 
-          # 宿主上的「FileBrowser」，用来观察回环 splice 是否仍然存在
           python3 -c "
           import http.server
           class H(http.server.BaseHTTPRequestHandler):
@@ -66,108 +66,98 @@ jobs:
               def log_message(*a): pass
           http.server.HTTPServer(('127.0.0.1',18080),H).serve_forever()" &
           HOSTSVC=$!
-          sleep 1
 
-          cat > "$RUNNER_TEMP/inst.sh" <<'INNER'
-          # 沙箱内：socat 把 bind-mount 进来的 unix socket 桥到本 netns 的 13101，
-          # 然后起「dsh」。13101 只存在于本实例私有的网络命名空间里。
-          socat UNIX-LISTEN:"$SOCK",fork,mode=600 TCP:127.0.0.1:13101 &
-          exec python3 -c "
-          import http.server, os
-          who = os.environ['WHO']
-          class H(http.server.BaseHTTPRequestHandler):
-              def do_GET(s):
-                  s.send_response(200); s.end_headers(); s.wfile.write(f'dsh-{who}'.encode())
-              def log_message(*a): pass
-          http.server.HTTPServer(('127.0.0.1',13101),H).serve_forever()"
-INNER
+          # 沙箱内的实例脚本：socat 把挂进来的 unix socket 桥到本 netns 的 13101
+          {
+            echo 'socat UNIX-LISTEN:"$SOCK",fork,mode=600 TCP:127.0.0.1:13101 &'
+            echo 'exec python3 -c "'
+            echo 'import http.server, os'
+            echo 'who = os.environ[\"WHO\"]'
+            echo 'class H(http.server.BaseHTTPRequestHandler):'
+            echo '    def do_GET(s):'
+            echo '        s.send_response(200); s.end_headers(); s.wfile.write((\"dsh-\"+who).encode())'
+            echo '    def log_message(*a): pass'
+            echo 'http.server.HTTPServer((\"127.0.0.1\",13101),H).serve_forever()"'
+          } > "$RUNNER_TEMP/inst.sh"
 
-          launch() { # $1=name
+          launch() {
             local who=$1
-            timeout 90 pasta --config-net --no-map-gw --dns-forward 10.0.2.3 -- \
+            timeout 100 pasta --config-net --no-map-gw --dns-forward 10.0.2.3 -- \
               bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
                     --ro-bind "$RESOLV" /etc/resolv.conf \
                     --bind "$SOCKDIR" "$SOCKDIR" \
                     --setenv SOCK "$SOCKDIR/$who.sock" --setenv WHO "$who" \
                     --unshare-user --unshare-ipc --unshare-pid --unshare-uts --share-net \
-                    -- bash "$RUNNER_TEMP/inst.sh" &
+                    -- bash "$RUNNER_TEMP/inst.sh" >/dev/null 2>&1 &
           }
 
-          echo "=== 起两个实例（员工 B 与员工 A），各自私有 netns ==="
+          echo "=== 起两个实例（员工 A / 员工 B），各自私有 netns ==="
           launch B; PB=$!
           launch A; PA=$!
-          sleep 8
+          sleep 10
           ls -l "$SOCKDIR" | sed 's/^/     /'
           echo
 
-          echo "=== 1. nginx（宿主）经 unix socket 能否连到实例 ==="
+          echo "=== 1. nginx（宿主）经 unix socket 连实例 ==="
           FROM_HOST=$(curl -s --max-time 5 --unix-socket "$SOCKDIR/B.sock" http://x/ 2>/dev/null || echo "")
-          [ "$FROM_HOST" = "dsh-B" ] && ok "宿主经 unix socket 连到 B" "nginx -> dsh 这条路通" \
-                                     || bad "宿主经 unix socket 连不到 B" "收到 '${FROM_HOST:-空}'"
+          if [ "$FROM_HOST" = "dsh-B" ]; then ok "宿主经 unix socket 连到 B" "nginx -> dsh 通"
+          else bad "宿主经 unix socket 连不到 B" "收到 '${FROM_HOST:-空}'"; fi
 
           echo
-          echo "=== 2. B 的实例是否还在宿主回环/网卡上留了端口 ==="
+          echo "=== 2. 宿主回环/网卡上是否还留着 13101 端口 ==="
           P1=$(curl -s --max-time 4 -o /dev/null -w '%{http_code}' http://127.0.0.1:13101/ 2>/dev/null)
           P2=$(curl -s --max-time 4 -o /dev/null -w '%{http_code}' "http://$HOSTIP:13101/" 2>/dev/null)
-          [ "$P1" = "000" ] && ok "宿主回环上无 13101 端口" || bad "宿主回环上仍有 13101" "HTTP $P1"
-          [ "$P2" = "000" ] && ok "宿主外部网卡上无 13101 端口" || bad "宿主 eth0 上仍有 13101" "HTTP $P2"
-          inf "宿主 ss 结果" "$(ss -ltn 2>/dev/null | grep -c ':13101' || echo 0) 个 13101 监听"
+          NL=$(ss -ltn 2>/dev/null | grep -c ':13101' || true)
+          [ "$P1" = "000" ] && ok "宿主回环上无 13101" || bad "宿主回环上仍有 13101" "HTTP $P1"
+          [ "$P2" = "000" ] && ok "宿主 eth0 上无 13101" || bad "宿主 eth0 上仍有 13101" "HTTP $P2"
+          inf "ss -ltn 中的 13101 监听数" "$NL"
 
           echo
-          echo "=== 3. ★ 员工 A 能否连到员工 B 的实例 ==="
+          echo "=== 3. 员工 A 能否连到员工 B 的实例（本轮核心） ==="
           A_LOOP=$(timeout 30 pasta --config-net --no-map-gw -- \
                      curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
           A_EXT=$(timeout 30 env HOSTIP="$HOSTIP" pasta --config-net --no-map-gw -- \
                      bash -c 'curl -s --max-time 5 "http://$HOSTIP:13101/" 2>/dev/null' || echo "")
-          A_SOCK=$(timeout 30 pasta --config-net --no-map-gw -- \
-                     bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
-                           --unshare-user --share-net -- \
+          A_SOCK=$(timeout 30 bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
+                     --tmpfs "$SOCKDIR" --unshare-user -- \
                      curl -s --max-time 5 --unix-socket "$SOCKDIR/B.sock" http://x/ 2>/dev/null || echo "")
           inf "A 经 127.0.0.1:13101" "'${A_LOOP:-空}'"
           inf "A 经 $HOSTIP:13101" "'${A_EXT:-空}'"
-          inf "A 经 B 的 unix socket" "'${A_SOCK:-空}'（socket 未挂进 A 的沙箱）"
+          inf "A 经 B 的 unix socket" "'${A_SOCK:-空}' (socket 未挂进 A)"
           if [ -z "$A_LOOP" ] && [ -z "$A_EXT" ] && [ -z "$A_SOCK" ]; then
-            ok "员工 A 无法连到员工 B 的实例" "★★ 残留风险已封堵"
+            ok "员工 A 无法连到员工 B" "残留风险已封堵"
           else
-            bad "员工 A 仍能连到员工 B" "★★ 未封堵"
+            bad "员工 A 仍能连到员工 B" "未封堵"
           fi
 
           echo
-          echo "=== 4. 沙箱内出网是否仍然可用（dsh 要调模型 API） ==="
+          echo "=== 4. 沙箱内出网（dsh 要调模型 API） ==="
           NETOUT=$(timeout 60 pasta --config-net --no-map-gw --dns-forward 10.0.2.3 -- \
                     bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
                           --ro-bind "$RESOLV" /etc/resolv.conf --unshare-user --share-net -- \
-                    bash -c 'echo "DNS=$(getent hosts github.com >/dev/null 2>&1 && echo YES || echo NO)";
-                             echo "HTTPS=$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://github.com 2>/dev/null)"' 2>&1)
+                    bash -c 'echo "DNS=$(getent hosts github.com >/dev/null 2>&1 && echo YES || echo NO)"; echo "HTTPS=$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://github.com 2>/dev/null)"' 2>&1)
           echo "$NETOUT" | grep -E '^(DNS|HTTPS)=' | sed 's/^/     /'
           echo "$NETOUT" | grep -q 'DNS=YES' && ok "DNS 可用" || bad "DNS 不可用"
           echo "$NETOUT" | grep -qE 'HTTPS=(200|301|302)' && ok "出网 HTTPS 可用" || bad "出网 HTTPS 不可用"
 
           echo
-          echo "=== 5. nginx 真的能 proxy_pass 到 unix socket 吗 ==="
-          sudo apt-get install -y -qq nginx-light >/dev/null 2>&1 || true
-          cat > "$RUNNER_TEMP/ng.conf" <<NGEOF
-          events {}
-          http {
-            access_log off;
-            server {
-              listen 18099;
-              location / { proxy_pass http://unix:$SOCKDIR/B.sock:/; }
-            }
-          }
-NGEOF
+          echo "=== 5. nginx 能否 proxy_pass 到 unix socket ==="
+          {
+            printf 'events {}\n'
+            printf 'http {\n  access_log off;\n  server {\n    listen 18099;\n'
+            printf '    location / { proxy_pass http://unix:%s/B.sock:/; }\n' "$SOCKDIR"
+            printf '  }\n}\n'
+          } > "$RUNNER_TEMP/ng.conf"
           sudo nginx -c "$RUNNER_TEMP/ng.conf" -g "pid $RUNNER_TEMP/ng.pid; error_log $RUNNER_TEMP/ng.err;" 2>&1 | sed 's/^/     /' || true
           sleep 2
-          VIA_NGINX=$(curl -s --max-time 5 http://127.0.0.1:18099/ 2>/dev/null || echo "")
-          [ "$VIA_NGINX" = "dsh-B" ] && ok "nginx proxy_pass 到 unix socket 成功" "收到 '$VIA_NGINX'" \
-                                     || bad "nginx 经 unix socket 失败" "收到 '${VIA_NGINX:-空}' $(tail -2 "$RUNNER_TEMP/ng.err" 2>/dev/null | tr '\n' ' ')"
+          VIA=$(curl -s --max-time 5 http://127.0.0.1:18099/ 2>/dev/null || echo "")
+          if [ "$VIA" = "dsh-B" ]; then ok "nginx proxy_pass 到 unix socket 成功"
+          else bad "nginx 经 unix socket 失败" "收到 '${VIA:-空}' $(tail -2 "$RUNNER_TEMP/ng.err" 2>/dev/null | tr '\n' ' ')"; fi
           sudo nginx -s quit -c "$RUNNER_TEMP/ng.conf" 2>/dev/null || true
-
           kill $PA $PB $HOSTSVC 2>/dev/null || true
+
           echo
           echo "================================================"
           printf '  通过 %d 项，失败 %d 项\n' "$pass" "$fail"
-          [ "$fail" -eq 0 ] && echo "  ★ 方案成立：私有 netns + unix socket 入站，可封掉实例间互连" \
-                            || echo "  方案仍有缺口，见上方 ❌"
           echo "================================================"
           exit 0
