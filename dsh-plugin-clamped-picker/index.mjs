@@ -26,25 +26,39 @@ const BrowseDirectoryPicker = (
   await import(`file://${DSH_PKGS}/dsh-host-directory-picker-browse/lib/index.js`)
 ).default
 
-let ROOT = null
-if (process.env.DSH_ALLOWED_ROOT && process.env.DSH_ALLOWED_ROOT !== '') {
+// 允许根可以有多个：本人工作区，外加主管的部门目录、管理员配置的共享空间。
+// DSH_ALLOWED_ROOTS 每行一条；没有它时回退到单个 DSH_ALLOWED_ROOT。
+const rawRoots = (
+  process.env.DSH_ALLOWED_ROOTS || process.env.DSH_ALLOWED_ROOT || ''
+)
+  .split('\n')
+  .map((r) => r.trim())
+  .filter(Boolean)
+
+const ROOTS = []
+for (const r of rawRoots) {
   try {
-    ROOT = realpathSync(process.env.DSH_ALLOWED_ROOT)
+    ROOTS.push(realpathSync(r))
   } catch {
-    console.error(
-      `[clamped-picker] DSH_ALLOWED_ROOT="${process.env.DSH_ALLOWED_ROOT}" does not exist; picker runs UNCLAMPED`
-    )
+    console.error(`[clamped-picker] allowed root "${r}" does not exist; ignored`)
   }
 }
+if (rawRoots.length > 0 && ROOTS.length === 0) {
+  console.error('[clamped-picker] no allowed root resolved; picker runs UNCLAMPED')
+}
+// 主根用于「客户端没给路径时打开哪儿」，取第一个（core.py 保证是本人工作区）
+const ROOT = ROOTS.length > 0 ? ROOTS[0] : null
+
+const under = (abs) => ROOTS.some((r) => abs === r || abs.startsWith(r + sep))
 
 class ClampedDirectoryPicker extends BrowseDirectoryPicker {
   #clamp(p) {
     const abs = resolve(p)
-    if (abs !== ROOT && !abs.startsWith(ROOT + sep)) {
+    if (!under(abs)) {
       throw new DirectoryPickerError(
         'directory-unreadable',
         abs,
-        `"${abs}" is outside the allowed root "${ROOT}"`
+        `"${abs}" is outside the allowed roots: ${ROOTS.join(', ')}`
       )
     }
     return abs
@@ -54,9 +68,8 @@ class ClampedDirectoryPicker extends BrowseDirectoryPicker {
     if (ROOT === null) return super.list(path, signal)
     const target = path === undefined || path === '' ? ROOT : this.#clamp(path)
     const listing = await super.list(target, signal)
-    listing.crumbs = listing.crumbs.filter(
-      (c) => c.path === ROOT || c.path.startsWith(ROOT + sep)
-    )
+    // 面包屑只保留落在某个允许根内的层级，越过根的祖先不显示
+    listing.crumbs = listing.crumbs.filter((c) => under(c.path))
     return listing
   }
 

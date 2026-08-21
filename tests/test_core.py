@@ -314,6 +314,120 @@ class TestCreate(TempCase):
             self.engine.create_user("zhangsan", "张三", "研发部", "员工")
 
 
+class TestSpaceSync(TempCase):
+    """FileBrowser 的 scope 与 dsh 的可访问范围必须是同一个目录。"""
+
+    def test_staff_both_sides_are_personal_dir(self):
+        rec = self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        personal = str(self.cfg.departments / "研发部" / "张三")
+        self.assertEqual(self.fb.users["zhangsan"]["scopes"][0]["scope"],
+                         "/departments/研发部/张三")
+        self.assertEqual(rec["workspace"], personal)
+        info = self.engine.space_consistency(rec)
+        self.assertEqual(info["space"], personal)
+        self.assertTrue(info["in_sync"])
+
+    def test_lead_both_sides_are_department_dir(self):
+        rec = self.engine.create_user("lisi", "李四", "研发部", "主管")
+        self.assertEqual(self.fb.users["lisi"]["scopes"][0]["scope"], "/departments/研发部")
+        info = self.engine.space_consistency(rec)
+        self.assertEqual(info["space"], str(self.cfg.departments / "研发部"))
+        self.assertTrue(info["in_sync"])
+
+    def test_department_move_keeps_both_sides_in_sync(self):
+        self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        self.engine.update_user("zhangsan", department="市场部")
+        self.assertEqual(self.fb.users["zhangsan"]["scopes"][0]["scope"],
+                         "/departments/市场部/张三")
+        reg = json.loads(self.cfg.registry.read_text(encoding="utf-8"))
+        rec = reg["users"]["zhangsan"]
+        self.assertEqual(rec["workspace"], str(self.cfg.departments / "市场部" / "张三"))
+        self.assertTrue(self.engine.space_consistency(rec)["in_sync"])
+
+    def test_admin_space_is_whole_company(self):
+        self.assertEqual(self.engine.admin_space(), self.cfg.files_root)
+
+    def test_detects_drift_when_someone_edits_filebrowser_by_hand(self):
+        """有人绕过后台、直接在 FileBrowser 上把 scope 改宽了，状态要能看出来。"""
+        rec = self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        self.assertTrue(self.engine.space_consistency(rec, "/departments/研发部/张三")["in_sync"])
+
+        info = self.engine.space_consistency(rec, "/departments/研发部")   # 被改宽了
+        self.assertFalse(info["filebrowser_ok"])
+        self.assertFalse(info["in_sync"])
+        self.assertEqual(info["expected_scope"], "/departments/研发部/张三")
+        self.assertEqual(info["actual_scope"], "/departments/研发部")
+
+    def test_list_users_surfaces_drift(self):
+        """后台列表要直接把漂移显示出来，不用人去比对。"""
+        self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        self.assertTrue(self.engine.list_users()[0]["space"]["in_sync"])
+        self.fb.users["zhangsan"]["scopes"] = [{"name": "公司文件", "scope": "/departments"}]
+        row = self.engine.list_users()[0]
+        self.assertFalse(row["space"]["in_sync"])
+        self.assertEqual(row["space"]["actual_scope"], "/departments")
+
+
+class TestMounts(TempCase):
+    """额外空间：校验与生效计算。"""
+
+    def test_lead_gets_department_dir(self):
+        """此前只有 FileBrowser 给主管部门级 scope，dsh 侧却钳在个人目录。"""
+        rec = self.engine.create_user("lisi", "李四", "研发部", "主管")
+        mounts = self.engine.effective_mounts(rec)
+        self.assertEqual(mounts, [{"path": str(self.cfg.departments / "研发部"), "mode": "rw"}])
+
+    def test_staff_gets_nothing_extra(self):
+        rec = self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        self.assertEqual(self.engine.effective_mounts(rec), [])
+
+    def test_set_mounts_validates_and_restarts(self):
+        self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        shared = self.cfg.files_root / "shared" / "公共资料"
+        shared.mkdir(parents=True)
+        self.runner.spawned.clear()
+        rec = self.engine.set_mounts("zhangsan", [{"path": str(shared), "mode": "ro"}])
+        self.assertEqual(rec["mounts"], [{"path": str(shared.resolve()), "mode": "ro"}])
+        self.assertTrue(self.runner.spawned, "挂载集变了必须重启实例")
+
+    def test_rejects_path_outside_files_root(self):
+        """管理后台不能把 /etc 之类挂进员工的沙箱。"""
+        self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        for bad in ["/etc", "/", str(self.cfg.root / "dsh-auth")]:
+            with self.subTest(bad=bad), self.assertRaises(ProvisionError):
+                self.engine.set_mounts("zhangsan", [{"path": bad, "mode": "ro"}])
+
+    def test_rejects_symlink_escape(self):
+        """dsh-files 里放个指向外面的软链，解析后必须被拒。"""
+        self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        link = self.cfg.files_root / "escape"
+        link.symlink_to("/etc")
+        with self.assertRaises(ProvisionError):
+            self.engine.set_mounts("zhangsan", [{"path": str(link), "mode": "ro"}])
+
+    def test_rejects_bad_mode_and_missing_path(self):
+        self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        good = self.cfg.files_root / "ok"; good.mkdir()
+        with self.assertRaises(ProvisionError):
+            self.engine.set_mounts("zhangsan", [{"path": str(good), "mode": "rwx"}])
+        with self.assertRaises(ProvisionError):
+            self.engine.set_mounts("zhangsan", [{"path": str(self.cfg.files_root / "nope"), "mode": "ro"}])
+        with self.assertRaises(ProvisionError):
+            self.engine.set_mounts("zhangsan", [{"path": "relative/path", "mode": "ro"}])
+
+    def test_mounts_reach_sandbox_env(self):
+        rec = self.engine.create_user("lisi", "李四", "研发部", "主管")
+        encoded = self.engine._encode_mounts(self.engine.effective_mounts(rec))
+        self.assertEqual(encoded, f"rw\t{self.cfg.departments / '研发部'}")
+
+    def test_promotion_restarts_instance(self):
+        """员工升主管会多挂部门目录，必须重启才生效。"""
+        self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        self.runner.spawned.clear()
+        self.engine.update_user("zhangsan", role="主管")
+        self.assertTrue(self.runner.spawned, "角色变更改变了挂载集，应重启实例")
+
+
 class TestNetnsMode(TempCase):
     """网络隔离模式：nginx upstream 改用 unix socket，宿主回环上不留 dsh 端口。"""
 
@@ -347,12 +461,25 @@ class TestUpdate(TempCase):
         self.engine.create_user("zhangsan", "张三", "研发部", "员工")
         self.runner.spawned.clear()
 
-    def test_promote_to_lead_updates_filebrowser_only(self):
+    def test_promote_to_lead_syncs_both_sides(self):
+        """升主管后，FileBrowser 的 scope 与 dsh 的挂载必须同时变成部门目录。
+
+        旧行为只改了 FileBrowser 一侧，dsh 仍钳在个人目录，两边对不上；
+        而且挂载集变了就必须重启实例，否则改动不生效。
+        """
         self.engine.update_user("zhangsan", role="主管")
+
         fbu = self.fb.users["zhangsan"]
         self.assertEqual(fbu["scopes"][0]["scope"], "/departments/研发部")
         self.assertTrue(fbu["permissions"]["delete"])
-        self.assertEqual(self.runner.spawned, [], "角色变更不改路径，无需重启实例")
+
+        reg = json.loads(self.cfg.registry.read_text(encoding="utf-8"))
+        rec = reg["users"]["zhangsan"]
+        dept_dir = str(self.cfg.departments / "研发部")
+        self.assertIn({"path": dept_dir, "mode": "rw"}, self.engine.effective_mounts(rec))
+        self.assertTrue(self.engine.space_consistency(rec)["in_sync"])
+        self.assertTrue(self.runner.spawned, "挂载集变了，必须重启实例才生效")
+
         auth = core.parse_users_yaml(self.cfg.auth_users.read_text(encoding="utf-8"))
         self.assertEqual(auth["zhangsan"]["displayname"], "张三（研发部主管）")
 

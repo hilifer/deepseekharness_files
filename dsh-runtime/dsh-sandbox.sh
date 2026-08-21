@@ -46,6 +46,13 @@ DSH_TRUSTED_HOSTS="${DSH_TRUSTED_HOSTS:-218.17.143.249:8099}"
 # 允许透传进沙箱的环境变量名（dsh 的模型 API Key 之类放这里）
 DSH_SANDBOX_PASSENV="${DSH_SANDBOX_PASSENV:-}"
 
+# 本人工作区之外还要挂载的空间，由 core.py 计算后传入。
+# 每行一条 "mode<TAB>path"，mode 为 ro 或 rw。典型来源：
+#   - 主管：整个部门目录（rw），与 FileBrowser 的部门级 scope 对齐
+#   - 管理员在后台为某人单独配置的共享目录 / 只读资料库
+# core.py 已校验过每条路径解析符号链接后仍在 dsh-files 之内。
+DSH_EXTRA_MOUNTS="${DSH_EXTRA_MOUNTS:-}"
+
 # 网络隔离模式（可选，默认关闭）。
 #   0 = 与宿主共享网络命名空间。文件系统仍完全隔离，但沙箱能连宿主 127.0.0.1
 #       上的服务；FileBrowser 与管理后台已用密钥头挡住，但【员工 A 可以直连
@@ -191,6 +198,25 @@ args+=(--ro-bind "$NODE_ROOT" "$NODE_ROOT")
 args+=(--bind "$DSH_HOME_DIR" "$DSH_HOME_DIR")
 args+=(--bind "$WORKSPACE" "$WORKSPACE")
 
+# 额外空间。allowed_roots 供选择器钳制插件使用（本人工作区永远在内）。
+allowed_roots="$WORKSPACE"
+if [ -n "$DSH_EXTRA_MOUNTS" ]; then
+  while IFS=$'\t' read -r m_mode m_path; do
+    [ -n "${m_path:-}" ] || continue
+    if [ ! -d "$m_path" ]; then
+      log "跳过不存在的额外挂载: $m_path"; continue
+    fi
+    m_real=$(readlink -f "$m_path")
+    case "$m_mode" in
+      rw) args+=(--bind "$m_real" "$m_real") ;;
+      ro) args+=(--ro-bind "$m_real" "$m_real") ;;
+      *)  die "额外挂载模式不合法: $m_mode ($m_path)" ;;
+    esac
+    log "  额外空间 [$m_mode] $m_real"
+    allowed_roots="$allowed_roots"$'\n'"$m_real"
+  done <<< "$DSH_EXTRA_MOUNTS"
+fi
+
 # 共享 profiles 只读挂载。
 # 现状是每个 DSH_HOME 下 profiles 符号链接到同一个共享目录，而所有实例同为
 # ubuntu 用户 —— 任何员工都能改写 clamped-picker/index.mjs 影响全体。
@@ -243,7 +269,8 @@ args+=(--clearenv)
 args+=(--setenv PATH "$NODE_ROOT/bin:/usr/local/bin:/usr/bin:/bin")
 args+=(--setenv HOME "$DSH_HOME_DIR")
 args+=(--setenv DSH_HOME "$DSH_HOME_DIR")
-args+=(--setenv DSH_ALLOWED_ROOT "$WORKSPACE")   # 第二层：选择器 UX 钳制
+args+=(--setenv DSH_ALLOWED_ROOT "$WORKSPACE")     # 第二层：选择器 UX 钳制（主工作区）
+args+=(--setenv DSH_ALLOWED_ROOTS "$allowed_roots") # 含额外空间的完整允许列表，每行一条
 args+=(--setenv DSH_NODE_ROOT "$NODE_ROOT")     # 钳制插件据此定位 dsh 的内部包
 args+=(--setenv USER "$USERNAME")
 args+=(--setenv LANG "${LANG:-C.UTF-8}")

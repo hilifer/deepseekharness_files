@@ -150,6 +150,22 @@ v1.5.2 版本无内置回收站。主管删除部门文件为**永久删除**（
 | 共享密钥 | `~/admin/.admin-token`、`~/nginx/conf/generated/`（均 600，不入库） |
 | 操作手册 | 本文件 `/home/ubuntu/scripts/OPS.md` |
 
+## 空间模型
+
+| 角色 | 空间 | 说明 |
+|------|------|------|
+| 员工 | `departments/<部门>/<姓名>` | 只有自己的目录 |
+| 主管 | `departments/<部门>` | 整个部门，可删部门文件 |
+| admin | `dsh-files` | 整个公司（3080 实例即以此为工作区） |
+
+**FileBrowser 的 scope 与 dsh 沙箱的挂载都由 `admin/core.py` 的 `space_for()`
+推导**，不存在两套定义。改角色或改部门时两边一起更新，并重启实例让新挂载生效
+（升主管会多挂一层部门目录，不重启不生效）。
+
+后台列表的「两边同步」列拿 FileBrowser 里的**实际** scope 与定义比对。显示
+「不一致」说明有人绕过后台直接改过 FileBrowser 权限，用「编辑」保存一次即可纠正，
+命令行等价物是 `python3 admin/cli.py update <user> --role <当前角色>`。
+
 ## 工作区隔离
 
 分两层，内核层是真边界，UX 层只管好看。

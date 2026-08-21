@@ -90,15 +90,19 @@ input:focus,select:focus{outline:2px solid color-mix(in srgb,var(--accent) 45%,t
       <table>
         <thead><tr>
           <th>用户名</th><th>姓名</th><th>部门</th><th>角色</th><th>dsh 端口</th>
-          <th>同步状态</th><th>工作区</th><th>操作</th>
+          <th>子系统</th><th>可访问空间</th><th>两边同步</th><th>操作</th>
         </tr></thead>
-        <tbody id="rows"><tr><td colspan="8" class="empty"><span class="spin"></span> 加载中…</td></tr></tbody>
+        <tbody id="rows"><tr><td colspan="9" class="empty"><span class="spin"></span> 加载中…</td></tr></tbody>
       </table>
     </div>
   </div>
   <p class="hint" style="margin-top:14px">
-    同步状态的五个点依次代表 <b>Authelia 账号 / nginx 路由 / FileBrowser 权限 / dsh 实例 / 工作区目录</b>。
-    全绿才是健康；变红说明该子系统与登记表不一致（通常是有人手工改过配置），把鼠标悬停在点上可看具体项。
+    <b>子系统</b>五个点依次代表 Authelia 账号 / nginx 路由 / FileBrowser 权限 / dsh 实例 / 工作区目录，
+    全绿才是健康；悬停可看具体项。<br>
+    <b>可访问空间</b>是该员工在文件服务器和 dsh 工作台里都能碰到的范围，两边由同一个定义推导：
+    员工 = 自己的目录，主管 = 整个部门，admin = 整个公司。<br>
+    <b>两边同步</b>显示 FileBrowser 里的实际 scope 是否与该定义一致。显示「不一致」通常是有人绕过本后台、
+    直接在 FileBrowser 界面上改过权限——悬停可看实际值与应有值，用「编辑」保存一次即可纠正。
   </p>
 </div>
 
@@ -173,13 +177,13 @@ async function load() {
     render();
   } catch (e) {
     $('#banner').innerHTML = `<div class="banner bad">加载失败：${esc(e.message)}</div>`;
-    $('#rows').innerHTML = `<tr><td colspan="8" class="empty">${esc(e.message)}</td></tr>`;
+    $('#rows').innerHTML = `<tr><td colspan="9" class="empty">${esc(e.message)}</td></tr>`;
   }
 }
 
 function render() {
   if (!USERS.length) {
-    $('#rows').innerHTML = `<tr><td colspan="8" class="empty">还没有员工，点右上角「新增员工」开始。</td></tr>`;
+    $('#rows').innerHTML = `<tr><td colspan="9" class="empty">还没有员工，点右上角「新增员工」开始。</td></tr>`;
     return;
   }
   $('#rows').innerHTML = USERS.map(u => {
@@ -187,7 +191,13 @@ function render() {
     const dots = Object.keys(LABELS).map(k =>
       `<span class="dot ${st[k] ? 'on' : ''}" title="${LABELS[k]}：${st[k] ? '正常' : '缺失/异常'}"></span>`
     ).join('');
-    const ws = (u.workspace || '').replace('/home/ubuntu/dsh-files', '');
+    const sp = u.space || {};
+    const spacePath = (sp.space || u.workspace || '').replace(/^.*\/dsh-files/, '');
+    const syncCell = sp.in_sync
+      ? '<span class="tag" style="color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent)">一致</span>'
+      : `<span class="tag" style="color:var(--danger);border-color:color-mix(in srgb,var(--danger) 45%,transparent)"
+             title="${esc('FileBrowser 实际 scope: ' + (sp.actual_scope ?? '未知') +
+                          '\n应为: ' + (sp.expected_scope ?? '?'))}">不一致</span>`;
     return `<tr>
       <td><code>${esc(u.username)}</code></td>
       <td>${esc(u.name)}</td>
@@ -195,7 +205,8 @@ function render() {
       <td>${u.role === '主管' ? '<span class="tag lead">主管</span>' : '<span class="tag">员工</span>'}</td>
       <td><code>${esc(u.port)}</code></td>
       <td><div class="dots">${dots}</div></td>
-      <td class="muted"><code>${esc(ws)}</code></td>
+      <td class="muted"><code>${esc(spacePath)}</code></td>
+      <td>${syncCell}</td>
       <td><div class="acts">
         <button class="sm" data-act="edit" data-u="${esc(u.username)}">编辑</button>
         <button class="sm" data-act="pw" data-u="${esc(u.username)}">重置密码</button>

@@ -40,6 +40,9 @@ ROLE_STAFF = "员工"
 ROLE_LEAD = "主管"
 ROLES = (ROLE_STAFF, ROLE_LEAD)
 
+# 内置管理员账号：不在员工登记表里，空间是整个文件根
+ADMIN_USERNAME = "admin"
+
 # 用户名会被拼进 YAML 键、nginx 配置、进程命令行和文件路径。
 # 原 provision-user.sh 未做任何校验，含引号/分号/换行的输入可以破坏
 # users_database.yml、注入 nginx 指令。这里用白名单一次性堵死。
@@ -89,6 +92,37 @@ def validate_role(value: str) -> str:
     if value not in ROLES:
         raise ProvisionError(f"角色必须是 {ROLE_STAFF} 或 {ROLE_LEAD}（收到: {value!r}）")
     return value
+
+
+MOUNT_MODES = ("ro", "rw")
+
+
+def validate_mount(root_dir: Path, path: str, mode: str) -> dict:
+    """校验一条额外挂载。
+
+    这是管理后台能写进沙箱的东西，等于把宿主上的一段文件系统交给员工的
+    agent，所以校验必须严：绝对路径、解析符号链接后仍在文件根之内、
+    真实存在、模式只能是 ro/rw。少一条都可能被用来把 /etc 或别人的
+    DSH_HOME 挂进沙箱。
+    """
+    mode = (mode or "ro").strip().lower()
+    if mode not in MOUNT_MODES:
+        raise ProvisionError(f"挂载模式只能是 ro 或 rw（收到: {mode!r}）")
+    raw = (path or "").strip()
+    if not raw.startswith("/"):
+        raise ProvisionError(f"挂载路径必须是绝对路径: {raw!r}")
+    try:
+        resolved = Path(raw).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ProvisionError(f"挂载路径不存在或无法解析: {raw}（{exc}）") from exc
+    if not resolved.is_dir():
+        raise ProvisionError(f"挂载路径必须是目录: {resolved}")
+    files_root = root_dir.resolve()
+    # 解析符号链接之后再比较，否则 dsh-files 里放个指向 / 的链接就穿透了
+    if resolved != files_root and files_root not in resolved.parents:
+        raise ProvisionError(
+            f"挂载路径必须位于 {files_root} 之内（解析后为 {resolved}）")
+    return {"path": str(resolved), "mode": mode}
 
 
 def generate_password(length: int = 14) -> str:
@@ -368,6 +402,63 @@ class Engine:
     def workspace_for(self, department: str, name: str) -> Path:
         return self.cfg.departments / department / name
 
+    def space_for(self, department: str, name: str, role: str) -> Path:
+        """该用户的空间——**唯一**的权威定义。
+
+        三层：
+
+          员工   -> departments/<部门>/<姓名>   只有自己的目录
+          主管   -> departments/<部门>          整个部门
+          admin  -> dsh-files                  整个公司（见 admin_space）
+
+        FileBrowser 的 scope 和 dsh 沙箱的挂载都由它推导，两边不再各写一套。
+        此前就漂过：FileBrowser 给了主管部门级 scope，dsh 侧却仍钳在个人
+        目录，同一个人在文件服务器和工作台里看到的范围对不上。
+        """
+        if role == ROLE_LEAD:
+            return self.cfg.departments / department
+        return self.cfg.departments / department / name
+
+    def admin_space(self) -> Path:
+        """内置管理员的空间：整个文件根。
+
+        start-all.sh 就是用这个路径拉起 admin 的 3080 实例的；
+        FileBrowser 侧 adminUsername 天然拥有 source 全量访问。
+        """
+        return self.cfg.files_root
+
+    def fb_scope_for(self, department: str, name: str, role: str) -> str:
+        """space_for 的 FileBrowser 表示：相对 source 根的路径。"""
+        space = self.space_for(department, name, role)
+        return "/" + str(space.relative_to(self.cfg.files_root))
+
+    def effective_mounts(self, rec: dict) -> list[dict]:
+        """该用户的 dsh 实例除本人工作区外还应挂载的目录。
+
+        主管自动获得整个部门目录（可写）——此前只有 FileBrowser 侧给了主管
+        部门级 scope，dsh 侧却仍钳在个人目录，两边对不上。
+        再加上管理员在后台为其单独配置的额外挂载。
+        """
+        mounts: list[dict] = []
+        own = rec.get("workspace") or ""
+        space = self.space_for(rec.get("department", ""), rec.get("name", ""),
+                               rec.get("role", ROLE_STAFF))
+        # 主管的空间是整个部门，比其个人工作区更大，要额外挂上去；
+        # 员工的空间就等于个人工作区，这里不会多挂任何东西。
+        if str(space) != own and space.is_dir():
+            mounts.append({"path": str(space), "mode": "rw"})
+        for m in rec.get("mounts") or []:
+            mounts.append({"path": m["path"], "mode": m.get("mode", "ro")})
+        # 已被本人工作区或部门目录覆盖的条目去掉，避免重复挂载
+        seen: set[str] = {own}
+        out = []
+        for m in mounts:
+            if m["path"] in seen:
+                continue
+            seen.add(m["path"])
+            out.append(m)
+        return out
+
     # ---------------- Authelia ----------------
     def _read_auth_users(self) -> dict:
         path = self.cfg.auth_users
@@ -417,10 +508,9 @@ class Engine:
 
     def _fb_apply(self, username: str, department: str, name: str, role: str) -> None:
         """设置 scope 与权限。主管 = 整个部门可删；员工 = 仅个人目录不可删。"""
-        if role == ROLE_LEAD:
-            scope, can_delete = f"/departments/{department}", True
-        else:
-            scope, can_delete = f"/departments/{department}/{name}", False
+        # scope 与 dsh 的挂载同源，见 space_for
+        scope = self.fb_scope_for(department, name, role)
+        can_delete = role == ROLE_LEAD
 
         users = self._fb_users()
         match = [u for u in users if u.get("username") == username]
@@ -519,6 +609,11 @@ class Engine:
     def dsh_stop(self, port: int) -> None:
         self.run.pkill(self._dsh_pattern(port))
 
+    @staticmethod
+    def _encode_mounts(mounts: list[dict]) -> str:
+        # 每行一条 "mode<TAB>path"：路径里可能有中文和空格，用制表符最稳
+        return "\n".join(f"{m['mode']}\t{m['path']}" for m in mounts)
+
     def dsh_start(self, username: str, rec: dict) -> None:
         port = rec["port"]
         if self.dsh_running(port):
@@ -533,7 +628,8 @@ class Engine:
             logfile=dsh_home / "dsh.log",
             env={"DSH_ROOT": str(self.cfg.root),
                  "DSH_TRUSTED_HOSTS": self.cfg.trusted_hosts,
-                 "DSH_NETNS": "1" if self.cfg.netns else "0"},
+                 "DSH_NETNS": "1" if self.cfg.netns else "0",
+                 "DSH_EXTRA_MOUNTS": self._encode_mounts(self.effective_mounts(rec))},
         )
 
     def dsh_restart(self, username: str, rec: dict) -> None:
@@ -572,14 +668,44 @@ class Engine:
     # ======================================================================
     # 对外接口
     # ======================================================================
+    def space_consistency(self, rec: dict, actual_fb_scope: str | None = None) -> dict:
+        """检查两边是否指向同一个空间。
+
+        注意必须拿 FileBrowser 里的【实际】 scope 来比。两边都从登记表重算
+        的话永远自洽，检测不出任何东西——真正会漂的是有人绕过后台、直接在
+        FileBrowser 的界面或 API 上改了 scope。
+        """
+        dept = rec.get("department", "")
+        name = rec.get("name", "")
+        role = rec.get("role", ROLE_STAFF)
+        space = self.space_for(dept, name, role)
+        expected_scope = self.fb_scope_for(dept, name, role)
+        dsh_paths = {rec.get("workspace") or ""} | {
+            m["path"] for m in self.effective_mounts(rec)}
+        dsh_ok = str(space) in dsh_paths
+        fb_ok = actual_fb_scope is None or actual_fb_scope == expected_scope
+        return {
+            "space": str(space),
+            "expected_scope": expected_scope,
+            "actual_scope": actual_fb_scope,
+            "dsh_ok": dsh_ok,
+            "filebrowser_ok": fb_ok,
+            "in_sync": dsh_ok and fb_ok,
+        }
+
     def list_users(self, *, with_status: bool = True) -> list[dict]:
         reg = self.load_registry()
         auth_users = self._read_auth_users() if self.cfg.auth_users.exists() else {}
         nginx_text = self.cfg.nginx_conf.read_text(encoding="utf-8") if self.cfg.nginx_conf.exists() else ""
         fb_names: set[str] = set()
+        fb_scopes: dict[str, str] = {}
         if with_status:
             try:
-                fb_names = {u.get("username") for u in self._fb_users()}
+                for u in self._fb_users():
+                    fb_names.add(u.get("username"))
+                    scopes = u.get("scopes") or []
+                    if scopes:
+                        fb_scopes[u.get("username")] = scopes[0].get("scope", "")
             except ProvisionError:
                 fb_names = set()
 
@@ -595,6 +721,8 @@ class Engine:
                     "workspace": bool(rec.get("workspace")) and Path(rec["workspace"]).is_dir(),
                 }
                 row["healthy"] = all(row["status"].values())
+            row["effective_mounts"] = self.effective_mounts(rec)
+            row["space"] = self.space_consistency(rec, fb_scopes.get(username))
             out.append(row)
         return out
 
@@ -637,7 +765,7 @@ class Engine:
 
         rec = {
             "username": username, "name": name, "department": department, "role": role,
-            "port": port, "workspace": str(workspace),
+            "port": port, "workspace": str(workspace), "mounts": [],
             "created_at": _now(), "updated_at": _now(),
         }
         reg["users"][username] = rec
@@ -648,6 +776,23 @@ class Engine:
         self.dsh_start(username, rec)
 
         return {**rec, "initial_password": password}
+
+    def set_mounts(self, username: str, mounts: list[dict]) -> dict:
+        """设置该用户额外可访问的空间（本人工作区之外）。改动后重启实例生效。"""
+        username = validate_username(username)
+        reg = self.load_registry()
+        rec = reg["users"].get(username)
+        if not rec:
+            raise ProvisionError(f"用户 {username} 不存在")
+        if len(mounts) > 16:
+            raise ProvisionError("额外挂载最多 16 条")
+        validated = [validate_mount(self.cfg.files_root, m.get("path", ""), m.get("mode", "ro"))
+                     for m in mounts]
+        rec["mounts"] = validated
+        rec["updated_at"] = _now()
+        self.save_registry(reg)
+        self.dsh_restart(username, rec)
+        return rec
 
     def update_user(self, username: str, *, name: str | None = None,
                     department: str | None = None, role: str | None = None,
@@ -661,6 +806,8 @@ class Engine:
         new_name = validate_label(name, "姓名") if name is not None else rec["name"]
         new_dept = validate_label(department, "部门") if department is not None else rec["department"]
         new_role = validate_role(role) if role is not None else rec["role"]
+        # 必须在 rec.update() 之前算：之后 rec["role"] 已是新值，比出来恒为 False
+        role_changed = new_role != rec["role"]
 
         old_ws = Path(rec["workspace"]) if rec.get("workspace") else None
         new_ws = self.workspace_for(new_dept, new_name)
@@ -698,6 +845,9 @@ class Engine:
             if ws_file.exists():
                 ws_file.unlink()
             self._seed_dsh_home(username, new_name, new_ws)
+            self.dsh_restart(username, rec)
+        elif role_changed:
+            # 主管多挂一层部门目录，员工少挂——挂载集变了就得重启
             self.dsh_restart(username, rec)
 
         return rec

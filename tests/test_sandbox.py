@@ -372,6 +372,98 @@ class NetnsIsolationTest(unittest.TestCase):
         self.assertIn("DNS_OK", r.stdout, f"沙箱内 DNS 应可用: {r.stdout!r} {r.stderr[-200:]!r}")
 
 
+@unittest.skipUnless(BWRAP_OK, "bubblewrap 不可用")
+class ExtraMountsTest(unittest.TestCase):
+    """额外空间：主管的部门目录、共享资料库等。
+
+    关键是「多挂了几个目录」不能把别的东西一起带进来——所以这里同时断言
+    额外空间按 ro/rw 生效，以及没被列出来的目录依然读不到。
+    """
+
+    PROBE = (
+        'r() { cat "$1"/marker 2>/dev/null || echo SEALED; }\n'
+        'w() { touch "$1"/.probe 2>/dev/null && echo RW || echo RO; }\n'
+        'echo "OWN_R=$(r $P_OWN)"; echo "OWN_W=$(w $P_OWN)"\n'
+        'echo "RWDIR_R=$(r $P_RW)"; echo "RWDIR_W=$(w $P_RW)"\n'
+        'echo "RODIR_R=$(r $P_RO)"; echo "RODIR_W=$(w $P_RO)"\n'
+        'echo "SECRET=$(r $P_SECRET)"\n'
+        'echo "ROOTS=$(echo "$DSH_ALLOWED_ROOTS" | tr "\\n" "|")"\n'
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name) / "home"
+        cls.root = root
+        for sub in ("node/bin", "dsh-users/u1", "files/own", "files/shared_rw",
+                    "files/shared_ro", "files/secret"):
+            (root / sub).mkdir(parents=True, exist_ok=True)
+        for name in ("own", "shared_rw", "shared_ro", "secret"):
+            (root / "files" / name / "marker").write_text(name, encoding="utf-8")
+        shutil.copy("/bin/bash", root / "node/bin/node")
+        probe = root / "node/bin/dsh"
+        probe.write_text(cls.PROBE, encoding="utf-8")
+        probe.chmod(0o755)
+
+        env = {
+            **os.environ,
+            "DSH_ROOT": str(root),
+            "DSH_NODE_ROOT": str(root / "node"),
+            "DSH_NODE_BIN": str(root / "node/bin/node"),
+            "DSH_BIN": str(root / "node/bin/dsh"),
+            "DSH_SANDBOX_PASSENV": "P_OWN P_RW P_RO P_SECRET",
+            "P_OWN": str(root / "files/own"),
+            "P_RW": str(root / "files/shared_rw"),
+            "P_RO": str(root / "files/shared_ro"),
+            "P_SECRET": str(root / "files/secret"),
+            "DSH_EXTRA_MOUNTS": (
+                f"rw\t{root / 'files/shared_rw'}\n"
+                f"ro\t{root / 'files/shared_ro'}"
+            ),
+        }
+        res = subprocess.run(
+            [str(REPO / "dsh-runtime/dsh-sandbox.sh"), "u1", "13501",
+             str(root / "dsh-users/u1"), str(root / "files/own")],
+            capture_output=True, text=True, timeout=90, env=env)
+        cls.out = {}
+        for line in res.stdout.splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                cls.out[k.strip()] = v.strip()
+        if not cls.out:
+            raise AssertionError(f"探针无输出: {res.stdout!r} / {res.stderr[-800:]!r}")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_own_workspace_readwrite(self):
+        self.assertEqual(self.out["OWN_R"], "own")
+        self.assertEqual(self.out["OWN_W"], "RW")
+
+    def test_rw_mount_is_writable(self):
+        """主管的部门目录这类：既能读也能写。"""
+        self.assertEqual(self.out["RWDIR_R"], "shared_rw")
+        self.assertEqual(self.out["RWDIR_W"], "RW")
+
+    def test_ro_mount_is_readable_but_not_writable(self):
+        """只读资料库：读得到，写不了。"""
+        self.assertEqual(self.out["RODIR_R"], "shared_ro")
+        self.assertEqual(self.out["RODIR_W"], "RO")
+
+    def test_unlisted_dir_still_sealed(self):
+        """没列进挂载表的目录，即便是同一个父目录下的兄弟，也必须看不到。"""
+        self.assertEqual(self.out["SECRET"], "SEALED")
+
+    def test_allowed_roots_passed_to_picker(self):
+        """选择器插件要拿到完整的允许根列表，否则能读却选不到。"""
+        roots = self.out["ROOTS"]
+        self.assertIn("own", roots)
+        self.assertIn("shared_rw", roots)
+        self.assertIn("shared_ro", roots)
+        self.assertNotIn("secret", roots)
+
+
 class SandboxFailClosedTest(unittest.TestCase):
     """沙箱不可用时必须拒绝启动，而不是退回无隔离运行。"""
 
