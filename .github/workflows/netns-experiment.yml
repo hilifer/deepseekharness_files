@@ -44,7 +44,11 @@ jobs:
       - name: 实验三 —— 私有 netns（pasta 出网）+ unix socket 入站
         run: |
           set -u
+          set +e   # GitHub 默认 bash -e；curl 连不上返回非 0 会掐断整个步骤
           pass=0; fail=0
+          # 同时回报 http_code 与 curl 退出码：7=拒绝连接（端口不存在），
+          # 56=连接被重置（端口存在但后端断了）——两者含义完全不同。
+          probe() { local c; c=$(curl -s --max-time 4 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null); echo "$c/$?"; }
           ok()  { printf '  \xe2\x9c\x85 %-44s %s\n' "$1" "${2:-}"; pass=$((pass+1)); }
           bad() { printf '  \xe2\x9d\x8c %-44s %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
           inf() { printf '  .  %-44s %s\n' "$1" "${2:-}"; }
@@ -82,7 +86,8 @@ jobs:
 
           launch() {
             local who=$1
-            timeout 100 pasta --config-net --no-map-gw --dns-forward 10.0.2.3 -- \
+            # -t none / -u none：明确不做任何入站端口转发，入站只走 unix socket
+            timeout 100 pasta --config-net --no-map-gw --dns-forward 10.0.2.3 -t none -u none -- \
               bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
                     --ro-bind "$RESOLV" /etc/resolv.conf \
                     --bind "$SOCKDIR" "$SOCKDIR" \
@@ -105,22 +110,24 @@ jobs:
 
           echo
           echo "=== 2. 宿主回环/网卡上是否还留着 13101 端口 ==="
-          P1=$(curl -s --max-time 4 -o /dev/null -w '%{http_code}' http://127.0.0.1:13101/ 2>/dev/null)
-          P2=$(curl -s --max-time 4 -o /dev/null -w '%{http_code}' "http://$HOSTIP:13101/" 2>/dev/null)
-          NL=$(ss -ltn 2>/dev/null | grep -c ':13101' || true)
-          [ "$P1" = "000" ] && ok "宿主回环上无 13101" || bad "宿主回环上仍有 13101" "HTTP $P1"
-          [ "$P2" = "000" ] && ok "宿主 eth0 上无 13101" || bad "宿主 eth0 上仍有 13101" "HTTP $P2"
-          inf "ss -ltn 中的 13101 监听数" "$NL"
+          echo "     宿主 ss -ltnp 中与 13101 相关的监听："
+          ss -ltnp 2>/dev/null | grep ':13101' | sed 's/^/       /' || echo "       （无）"
+          P1=$(probe http://127.0.0.1:13101/)
+          P2=$(probe "http://$HOSTIP:13101/")
+          inf "宿主回环 13101" "$P1  (http_code/curl退出码; 7=端口不存在)"
+          inf "宿主 eth0 13101" "$P2"
+          case "$P1" in 000/7|000/28) ok "宿主回环上无 13101" ;; *) bad "宿主回环上仍能连 13101" "$P1" ;; esac
+          case "$P2" in 000/7|000/28) ok "宿主 eth0 上无 13101" ;; *) bad "宿主 eth0 上仍能连 13101" "$P2" ;; esac
 
           echo
           echo "=== 3. 员工 A 能否连到员工 B 的实例（本轮核心） ==="
           A_LOOP=$(timeout 30 pasta --config-net --no-map-gw -- \
-                     curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
+                     bash -c 'curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null' || echo "")
           A_EXT=$(timeout 30 env HOSTIP="$HOSTIP" pasta --config-net --no-map-gw -- \
                      bash -c 'curl -s --max-time 5 "http://$HOSTIP:13101/" 2>/dev/null' || echo "")
           A_SOCK=$(timeout 30 bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
                      --tmpfs "$SOCKDIR" --unshare-user -- \
-                     curl -s --max-time 5 --unix-socket "$SOCKDIR/B.sock" http://x/ 2>/dev/null || echo "")
+                     bash -c 'curl -s --max-time 5 --unix-socket "'"$SOCKDIR"'/B.sock" http://x/ 2>/dev/null' || echo "")
           inf "A 经 127.0.0.1:13101" "'${A_LOOP:-空}'"
           inf "A 经 $HOSTIP:13101" "'${A_EXT:-空}'"
           inf "A 经 B 的 unix socket" "'${A_SOCK:-空}' (socket 未挂进 A)"
