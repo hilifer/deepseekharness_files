@@ -296,8 +296,18 @@ class NetnsIsolationTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        for p in cls.procs:
-            p.terminate()
+        # 必须 wait 回收：只 terminate 不回收会留下僵尸子进程，
+        # Python 退出时报 ResourceWarning: subprocess N is still running。
+        for proc in cls.procs:
+            proc.terminate()
+        for proc in cls.procs:
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            if proc.stdout:
+                proc.stdout.close()
         cls._tmp.cleanup()
 
     @staticmethod
