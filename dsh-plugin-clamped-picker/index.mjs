@@ -13,7 +13,11 @@
 import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 
-const DSH_PKGS = '/home/ubuntu/node/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai'
+// 路径随部署根而变，由 dsh-sandbox.sh 通过 DSH_PKGS 注入；
+// 未注入时回退到默认部署位置。
+const DSH_PKGS =
+  process.env.DSH_PKGS ||
+  `${process.env.DSH_NODE_ROOT || '/home/ubuntu/node'}/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai`
 
 const { DirectoryPickerError } = await import(
   `file://${DSH_PKGS}/dsh-host-directory-picker/lib/index.js`

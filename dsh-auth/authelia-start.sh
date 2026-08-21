@@ -1,11 +1,12 @@
 #!/bin/bash
-PIDFILE="$HOME/dsh-auth/authelia.pid"
-LOG="$HOME/dsh-auth/authelia.log"
+DSH_ROOT="${DSH_ROOT:-$HOME}"
+PIDFILE="$DSH_ROOT/dsh-auth/authelia.pid"
+LOG="$DSH_ROOT/dsh-auth/authelia.log"
 start() {
   if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     echo "authelia already running (pid $(cat "$PIDFILE"))"; return 0
   fi
-  setsid nohup "$HOME/dsh-auth/authelia" --config /home/ubuntu/dsh-auth/config/configuration.yml > "$LOG" 2>&1 &
+  setsid nohup "$DSH_ROOT/dsh-auth/authelia" --config "$DSH_ROOT/dsh-auth/config/configuration.yml" > "$LOG" 2>&1 &
   echo $! > "$PIDFILE"
   echo "authelia started (pid $(cat "$PIDFILE"))"
 }

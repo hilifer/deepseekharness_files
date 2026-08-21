@@ -34,6 +34,8 @@
 ├── scripts/
 │   ├── provision-user.sh      # 建号（cli.py 的薄包装，保持原 CLI 兼容）
 │   ├── deprovision-user.sh    # 离职销号（原先只有手工步骤）
+│   ├── configure-root.sh      # 把配置里的部署根改到实际路径（幂等可逆）
+│   ├── apparmor-allow-userns.sh # Ubuntu 24.04+ 放行 bwrap 的 userns 权限
 │   ├── init-secrets.sh        # 生成 nginx 注入的共享密钥（幂等）
 │   ├── install-bubblewrap.sh  # 无 root 安装 bwrap（解包 deb，同 nginx 的装法）
 │   ├── preflight-sandbox.sh   # 隔离验收：实测工作区以外到底碰不碰得到
@@ -60,7 +62,11 @@
 ## 快速开始
 
 ```bash
-# 0. 首次部署：安装沙箱并验收隔离（沙箱不可用时会拒绝启动实例、拒绝建号）
+# 0a. 部署根不是 /home/ubuntu 时（配置里只能写绝对路径），先改根
+./scripts/configure-root.sh --show        # 看当前配置里写的是哪个根
+./scripts/configure-root.sh "$HOME"       # 改成实际部署路径，幂等可重复
+
+# 0b. 首次部署：安装沙箱并验收隔离（沙箱不可用时会拒绝启动实例、拒绝建号）
 ./scripts/install-bubblewrap.sh
 sudo ./scripts/apparmor-allow-userns.sh   # Ubuntu 24.04+ 需要，先跑 --status 看是否必要
 ./scripts/preflight-sandbox.sh            # 逐项实测，全绿才算数

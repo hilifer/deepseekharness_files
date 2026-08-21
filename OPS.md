@@ -63,7 +63,24 @@ python3 /home/ubuntu/admin/cli.py list
 **重要提醒**：建号和改密码都会重启 Authelia，而会话存在内存里（未配 redis），
 所以**每次操作都会把所有在线用户登出一次**。批量建号请一次做完，或安排在非工作时段。
 
-### 3. 手工修复（后台不可用时的兜底）
+### 3. 部署根不是 /home/ubuntu
+
+nginx / FileBrowser / Authelia 的配置只能写绝对路径，仓库里默认是
+`/home/ubuntu`。若实际部署在别的用户下（比如 `/home/robot`）：
+
+```bash
+scripts/configure-root.sh --show          # 先看当前写的是哪个根
+scripts/configure-root.sh /home/robot     # 一次改完 22 处，幂等且可改回
+```
+
+各 shell 脚本与管理后台都读 `DSH_ROOT`（默认 `$HOME`），以非部署用户身份
+运行时显式传：`DSH_ROOT=/home/robot ./dsh-runtime/start-all.sh`。
+
+CI 里有一个 `alt-root` job 专门在 `/home/robot` 下跑通全栈（改根 → 生成
+密钥 → `nginx -t` → 起管理后台并验鉴权 → 沙箱隔离测试），所以这条路是
+每次都验过的，不是纸上写写。
+
+### 4. 手工修复（后台不可用时的兜底）
 
 ```bash
 # 登记表：/home/ubuntu/dsh-users/registry.json（权威来源，ports.json 由它同步生成）

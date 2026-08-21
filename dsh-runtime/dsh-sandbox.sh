@@ -244,6 +244,7 @@ args+=(--setenv PATH "$NODE_ROOT/bin:/usr/local/bin:/usr/bin:/bin")
 args+=(--setenv HOME "$DSH_HOME_DIR")
 args+=(--setenv DSH_HOME "$DSH_HOME_DIR")
 args+=(--setenv DSH_ALLOWED_ROOT "$WORKSPACE")   # 第二层：选择器 UX 钳制
+args+=(--setenv DSH_NODE_ROOT "$NODE_ROOT")     # 钳制插件据此定位 dsh 的内部包
 args+=(--setenv USER "$USERNAME")
 args+=(--setenv LANG "${LANG:-C.UTF-8}")
 args+=(--setenv TZ "${TZ:-Asia/Shanghai}")

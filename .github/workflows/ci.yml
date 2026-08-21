@@ -222,3 +222,125 @@ jobs:
           done
           [ $fail -eq 0 ] && echo "✅ 未发现真实密钥"
           exit $fail
+
+  apparmor-profile:
+    name: AppArmor profile 放行 userns（不全局降级）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 bubblewrap 与 apparmor 工具
+        run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap apparmor-utils
+
+      - name: 基线 —— 确认 runner 上确实是「被 AppArmor 拦住」的状态
+        # 目标服务器实测就是这个状态（sysctl = 1，bwrap 报 uid map Permission denied）。
+        # 这一步同时也保证：如果哪天 runner 默认不再拦，本 job 会明确告知而不是假装通过。
+        run: |
+          set -u
+          AA=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ ! -r "$AA" ]; then
+            echo "::warning::runner 上没有该 sysctl，无法复现目标服务器的场景"; exit 0
+          fi
+          echo "sysctl = $(cat $AA)"
+          if [ "$(cat $AA)" != "1" ]; then
+            echo "::warning::runner 未开启该限制，本 job 失去意义"; exit 0
+          fi
+          if bwrap --ro-bind / / --unshare-all --share-net true 2>/dev/null; then
+            echo "::error::限制开着 bwrap 却能跑，基线不成立"; exit 1
+          fi
+          echo "✅ 基线成立：bwrap 现在跑不起来"
+
+      - name: 跑 apparmor-allow-userns.sh（profile 方式，不动全局 sysctl）
+        run: sudo ./scripts/apparmor-allow-userns.sh
+
+      - name: 断言 bwrap 可用，且全局限制【仍然开着】
+        run: |
+          set -u
+          AA=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          [ -r "$AA" ] || exit 0
+          if ! bwrap --ro-bind / / --unshare-all --share-net true; then
+            echo "::error::profile 装了但 bwrap 仍不可用"; exit 1
+          fi
+          echo "✅ bwrap 可用"
+          if [ "$(cat $AA)" != "1" ]; then
+            echo "::error::全局 sysctl 被改成了 $(cat $AA) —— profile 方式不应削弱整机防护"; exit 1
+          fi
+          echo "✅ 全局限制仍为 1：只有 bwrap 拿到了 userns 权限，其余程序照旧受限"
+
+      - name: 沙箱隔离测试在这种放行方式下同样通过
+        run: python3 -m unittest tests.test_sandbox.SandboxIsolationTest -v
+
+  alt-root:
+    name: 非 /home/ubuntu 部署根
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+
+      - name: 安装依赖
+        run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap nginx-light openssl
+
+      - name: 放开非特权 user namespace 限制
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: 部署到 /home/robot 并改根
+        # 仓库里的配置默认写死 /home/ubuntu。这个 job 证明换个部署根也能跑通，
+        # 从而不必依赖「服务器上的用户一定叫 ubuntu」这个前提。
+        run: |
+          set -eu
+          R=/home/robot
+          sudo mkdir -p "$R" && sudo chown -R "$USER" "$R"
+          cp -r . "$R/" && rm -rf "$R/.git"
+          mkdir -p "$R"/nginx/{logs,certs,tmp} "$R"/nginx/extracted/etc/nginx \
+                   "$R"/{dsh-users,dsh-files/departments,filebrowser/logs}
+          cp /etc/nginx/mime.types "$R/nginx/extracted/etc/nginx/mime.types"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout "$R/nginx/certs/dsh.key" -out "$R/nginx/certs/dsh.crt" -subj '/CN=ci' 2>/dev/null
+          "$R/scripts/configure-root.sh" "$R"
+          echo "--- 确认配置里已无 /home/ubuntu ---"
+          if grep -rn "/home/ubuntu" "$R/nginx/conf" "$R/filebrowser/config.yaml"; then
+            echo "::error::改根后仍有 /home/ubuntu 残留"; exit 1
+          fi
+          echo "✅ 无残留"
+
+      - name: 在新根下生成密钥并校验 nginx 配置
+        run: |
+          set -eu
+          R=/home/robot
+          DSH_ROOT="$R" "$R/scripts/init-secrets.sh"
+          nginx -t -c "$R/nginx/conf/nginx.conf"
+          grep -q "$R/nginx/certs/dsh.crt" "$R/nginx/conf/sites/dsh-auth.conf"
+          echo "✅ nginx 在新根下配置有效"
+
+      - name: 在新根下启动管理后台并打通接口
+        run: |
+          set -eu
+          R=/home/robot
+          DSH_ROOT="$R" ADMIN_PORT=19277 nohup python3 "$R/admin/app.py" \
+            > "$R/admin.log" 2>&1 &
+          for _ in $(seq 1 15); do
+            curl -sf -o /dev/null -H "X-Admin-Token: $(cat "$R/admin/.admin-token")" \
+              -H "Remote-User: admin" http://127.0.0.1:19277/admin/api/health && break
+            sleep 1
+          done
+          OUT=$(curl -s -H "X-Admin-Token: $(cat "$R/admin/.admin-token")" \
+                     -H "Remote-User: admin" http://127.0.0.1:19277/admin/api/health)
+          echo "health: $OUT"
+          echo "$OUT" | grep -q '"sandbox_ok": *true' || {
+            echo "::error::新根下沙箱自检未通过: $OUT"; tail -20 "$R/admin.log"; exit 1; }
+          # 无 token 必须被拒
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Remote-User: admin" \
+                 http://127.0.0.1:19277/admin/api/users)
+          [ "$CODE" = "403" ] || { echo "::error::无 token 时应 403，实际 $CODE"; exit 1; }
+          echo "✅ 管理后台在新根下工作正常，且鉴权仍然生效"
+
+      - name: 在新根下跑沙箱隔离测试
+        run: |
+          set -eu
+          R=/home/robot
+          cd "$R" && DSH_ROOT="$R" python3 -m unittest tests.test_sandbox.SandboxIsolationTest
+          echo "✅ 沙箱在新根下同样生效"

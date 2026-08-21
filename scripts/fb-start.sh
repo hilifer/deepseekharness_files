@@ -1,9 +1,10 @@
 #!/bin/bash
 # FileBrowser Quantum start/stop/restart (rootless, setsid nohup, idempotent)
-BIN="/home/ubuntu/filebrowser/filebrowser"
-CONF="/home/ubuntu/filebrowser/config.yaml"
-PIDFILE="/home/ubuntu/filebrowser/fb.pid"
-LOG="/home/ubuntu/filebrowser/logs/fb.log"
+DSH_ROOT="${DSH_ROOT:-$HOME}"
+BIN="$DSH_ROOT/filebrowser/filebrowser"
+CONF="$DSH_ROOT/filebrowser/config.yaml"
+PIDFILE="$DSH_ROOT/filebrowser/fb.pid"
+LOG="$DSH_ROOT/filebrowser/logs/fb.log"
 
 is_up() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
