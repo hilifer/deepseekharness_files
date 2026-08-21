@@ -62,7 +62,8 @@
 ```bash
 # 0. 首次部署：安装沙箱并验收隔离（沙箱不可用时会拒绝启动实例、拒绝建号）
 ./scripts/install-bubblewrap.sh
-./scripts/preflight-sandbox.sh        # 逐项实测，全绿才算数
+sudo ./scripts/apparmor-allow-userns.sh   # Ubuntu 24.04+ 需要，先跑 --status 看是否必要
+./scripts/preflight-sandbox.sh            # 逐项实测，全绿才算数
 
 # 1. 全栈启动（幂等，可重复执行；建议加入容器 entrypoint）
 ./dsh-runtime/start-all.sh

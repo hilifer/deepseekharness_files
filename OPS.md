@@ -170,22 +170,29 @@ v1.5.2 版本无内置回收站。主管删除部门文件为**永久删除**（
 
 #### 排障：`bwrap: setting up uid map: Permission denied`
 
-最常见的一种失败，本项目的 CI 在 GitHub 的 ubuntu-24.04 runner 上实际撞到过。
-原因是 **Ubuntu 24.04 起 AppArmor 默认拦截非特权 user namespace**：
+最常见的一种失败。**本部署的服务器已实测为这种情况**
+（`kernel.apparmor_restrict_unprivileged_userns = 1`），本项目的 CI 在
+GitHub 的 ubuntu-24.04 runner 上也撞到过同一堵墙。原因是 Ubuntu 24.04 起
+AppArmor 默认拦截非特权 user namespace。
 
 ```bash
-cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns   # 为 1 即被拦
-sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0            # 临时
-echo 'kernel.apparmor_restrict_unprivileged_userns=0' \
-  | sudo tee /etc/sysctl.d/60-dsh-userns.conf && sudo sysctl --system    # 永久
+scripts/apparmor-allow-userns.sh --status     # 先看状态，不改动任何东西
+sudo scripts/apparmor-allow-userns.sh         # 推荐：只给 bwrap 开口子
+sudo scripts/apparmor-allow-userns.sh --sysctl  # 备选：全局关掉该限制
 ```
 
-**注意这个 sysctl 在容器内改不了，必须在宿主机上设置**——本部署跑在 rootless
-容器里，如果宿主是 Ubuntu 24.04+ 且你拿不到宿主的 root，这条路走不通。
-那种情况下的替代方案是给每个员工建独立的 OS 账号，靠文件系统属主+700 权限
-做隔离（同样需要 root，但只需一次性配置）。
+两种做法的取舍：
 
-`dsh-sandbox.sh --check` 会自动判别是这条还是别的原因，并打出对应的处理命令。
+| 做法 | 影响面 | 何时用 |
+|------|--------|--------|
+| AppArmor profile（默认） | 只有 bwrap 这一个可执行文件获得 userns 权限 | 首选 |
+| 全局 sysctl | 整机所有程序都不再受该限制 | 没有 apparmor_parser，或 profile 方式失败时 |
+
+这是**宿主机的内核设置**：如果服务跑在容器里而你拿不到宿主 root，两条路
+都走不通。那种情况下的替代方案是给每个员工建独立的 OS 账号，靠文件属主
+加 700 权限做隔离（同样要 root，但只需一次性配置）。
+
+`dsh-sandbox.sh --check` 会自动判别是这条还是别的原因，并打出对应命令。
 
 ### 第二层（UX）：目录选择器钳制
 

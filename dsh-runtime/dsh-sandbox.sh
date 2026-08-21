@@ -121,10 +121,9 @@ if [ "${1:-}" = "--check" ]; then
         if [ -r "$aa" ] && [ "$(cat "$aa")" = "1" ]; then
           log "  -> 已定位原因：AppArmor 拦截了非特权 user namespace"
           log "     （Ubuntu 24.04 起默认开启，报错为 'setting up uid map: Permission denied'）"
-          log "     临时放开: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
-          log "     永久放开: echo 'kernel.apparmor_restrict_unprivileged_userns=0' \\"
-          log "                 | sudo tee /etc/sysctl.d/60-dsh-userns.conf && sudo sysctl --system"
-          log "     容器内无法改这个 sysctl，需在宿主机上设置。"
+          log "     处理: sudo $DSH_ROOT/scripts/apparmor-allow-userns.sh"
+          log "           （默认只给 bwrap 开口子；加 --sysctl 则全局关闭该限制）"
+          log "     注意这是宿主机的内核设置，容器内改不了。"
         else
           log "  -> 其他可能原因:"
           log "     sysctl kernel.unprivileged_userns_clone / user.max_user_namespaces"
