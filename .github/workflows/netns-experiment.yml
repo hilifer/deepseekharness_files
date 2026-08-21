@@ -38,18 +38,17 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      - name: pasta 支持的相关选项
-        run: pasta --help 2>&1 | grep -iE 'tcp-ports|udp-ports|map-gw|config-net|netns|^ *-[tu] ' || true
+      - name: pasta 全部选项（上轮 grep 太窄，漏了 --no-splice）
+        run: pasta --help 2>&1 || true
 
-      - name: 实验
+      - name: 实验二 —— --no-splice 能否封住回环，以及 DNS 会不会被连带打断
         run: |
           set -u
           pass=0; fail=0
-          ok()  { printf '  ✅ %-44s %s\n' "$1" "${2:-}"; pass=$((pass+1)); }
-          bad() { printf '  ❌ %-44s %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
-          inf() { printf '  ·  %-44s %s\n' "$1" "${2:-}"; }
+          ok()  { printf '  ✅ %-46s %s\n' "$1" "${2:-}"; pass=$((pass+1)); }
+          bad() { printf '  ❌ %-46s %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
+          inf() { printf '  ·  %-46s %s\n' "$1" "${2:-}"; }
 
-          # 宿主上起一个「FileBrowser」，沙箱不该碰得到它
           python3 -c "
           import http.server
           class H(http.server.BaseHTTPRequestHandler):
@@ -59,114 +58,95 @@ jobs:
           http.server.HTTPServer(('127.0.0.1',18080),H).serve_forever()" &
           HOSTSVC=$!
           sleep 1
-          echo "宿主对照: $(curl -s --max-time 3 http://127.0.0.1:18080/)"
+          echo "宿主 resolv.conf:"; sed 's/^/     /' /etc/resolv.conf
           echo
 
-          BW="bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --die-with-parent"
+          # 上一轮的教训：curl 连不上时自己输出 000，再 || echo 000 会拼成 000000
+          PROBE='
+          code() { curl -s --max-time 4 -o /dev/null -w "%{http_code}" "$@" 2>/dev/null; }
+          echo "LOOP=$(code http://127.0.0.1:18080/)"
+          GW=$(ip route show default 2>/dev/null | awk "{print \$3}" | head -1)
+          echo "GWADDR=$GW"; echo "GWSVC=$(code http://$GW:18080/)"
+          echo "HOSTIP_SVC=$(code http://$HOSTIP:18080/)"
+          echo "DNS=$(getent hosts github.com >/dev/null 2>&1 && echo YES || echo NO)"
+          echo "HTTPS=$(code https://github.com)"
+          echo "RESOLV=$(tr "\n" ";" < /etc/resolv.conf | head -c 120)"
+          '
+          HOSTIP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+          echo "宿主 eth0 地址: $HOSTIP"; echo
 
-          echo "=== A. 现状：bwrap --share-net（共享宿主网络） ==="
-          A_LOOP=$($BW --unshare-all --share-net -- \
-            curl -s --max-time 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/ 2>/dev/null || echo 000)
-          A_NET=$($BW --unshare-all --share-net -- \
-            getent hosts github.com >/dev/null 2>&1 && echo YES || echo NO)
-          if [ "$A_LOOP" = "200" ]; then
-            inf "宿主回环可达" "HTTP $A_LOOP —— 这就是待封堵的残留风险"
-          else
-            inf "宿主回环可达" "HTTP $A_LOOP（意外）"
-          fi
-          inf "出网" "$A_NET"
+          run() { timeout 60 env HOSTIP="$HOSTIP" pasta "$@" -- bash -c "$PROBE" 2>&1 || echo RUNFAIL; }
+          rep() { echo "$1" | sed -n "s/^$2=//p" | head -1; }
+
+          for variant in "基线(仅 --no-map-gw)|--config-net --no-map-gw" \
+                         "加 --no-splice|--config-net --no-map-gw --no-splice"; do
+            label="${variant%%|*}"; flags="${variant#*|}"
+            echo "=== $label  [pasta $flags] ==="
+            # shellcheck disable=SC2086
+            OUT=$(run $flags)
+            echo "$OUT" | grep -E '^(LOOP|GWSVC|HOSTIP_SVC|DNS|HTTPS|RESOLV|RUNFAIL)=' | sed 's/^/     /'
+            L=$(rep "$OUT" LOOP); D=$(rep "$OUT" DNS); H=$(rep "$OUT" HTTPS)
+            G=$(rep "$OUT" GWSVC); I=$(rep "$OUT" HOSTIP_SVC)
+            [ "$L" = "000" ] && ok "[$label] 宿主回环不可达" || bad "[$label] 宿主回环可达" "HTTP $L"
+            [ "$G" = "000" ] && ok "[$label] 经网关回连被阻断" || bad "[$label] 经网关可回连" "HTTP $G"
+            [ "$I" = "000" ] && ok "[$label] 经宿主 eth0 地址不可达" || bad "[$label] 经宿主 eth0 可达" "HTTP $I"
+            [ "$D" = "YES" ] && ok "[$label] DNS 可用" || bad "[$label] DNS 不可用" "dsh 调不了模型 API"
+            case "$H" in 200|301|302) ok "[$label] 出网 HTTPS 可用" "HTTP $H";;
+                         *) bad "[$label] 出网 HTTPS 不可用" "HTTP $H";; esac
+            echo
+          done
+
+          echo "=== 若 --no-splice 打断了 DNS：用 pasta 自带的 DNS 转发器补回来 ==="
+          mkdir -p "$RUNNER_TEMP/ns"
+          echo "nameserver 10.0.2.3" > "$RUNNER_TEMP/ns/resolv.conf"
+          OUT=$(timeout 60 env HOSTIP="$HOSTIP" pasta --config-net --no-map-gw --no-splice \
+                  --dns-forward 10.0.2.3 -- \
+                  bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp \
+                        --ro-bind "$RUNNER_TEMP/ns/resolv.conf" /etc/resolv.conf \
+                        --unshare-user --unshare-ipc --unshare-pid --unshare-uts --share-net \
+                        -- bash -c "$PROBE" 2>&1 || echo RUNFAIL)
+          echo "$OUT" | grep -E '^(LOOP|GWSVC|HOSTIP_SVC|DNS|HTTPS|RESOLV|RUNFAIL)=' | sed 's/^/     /'
+          L=$(rep "$OUT" LOOP); D=$(rep "$OUT" DNS); H=$(rep "$OUT" HTTPS)
+          [ "$L" = "000" ] && ok "[完整形态] 宿主回环不可达" || bad "[完整形态] 宿主回环可达" "HTTP $L"
+          [ "$D" = "YES" ] && ok "[完整形态] DNS 可用（经 --dns-forward）" || bad "[完整形态] DNS 不可用"
+          case "$H" in 200|301|302) ok "[完整形态] 出网 HTTPS 可用" "HTTP $H";;
+                       *) bad "[完整形态] 出网 HTTPS 不可用" "HTTP $H";; esac
           echo
 
-          echo "=== B. pasta 独立网络命名空间（不套 bwrap，先单独验 pasta） ==="
-          B_OUT=$(timeout 60 pasta --config-net --no-map-gw -- bash -c '
-            echo "LOOP=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/ 2>/dev/null || echo 000)"
-            echo "DNS=$(getent hosts github.com >/dev/null 2>&1 && echo YES || echo NO)"
-            echo "HTTPS=$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://github.com 2>/dev/null || echo 000)"
-            GW=$(ip route show default 2>/dev/null | awk "{print \$3}" | head -1)
-            echo "GWADDR=$GW"
-            echo "GWSVC=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" http://$GW:18080/ 2>/dev/null || echo 000)"
-            echo "IFACES=$(ip -o -4 addr show 2>/dev/null | awk "{print \$2\"=\"\$4}" | tr "\n" " ")"
-          ' 2>&1 || echo "PASTA_FAILED")
-          echo "$B_OUT" | sed 's/^/     /'
-          g() { echo "$B_OUT" | sed -n "s/^$1=//p" | head -1; }
-          case "$(g LOOP)" in
-            000|"") ok "宿主回环不可达" "沙箱的 127.0.0.1 是它自己的" ;;
-            *)      bad "宿主回环仍可达" "HTTP $(g LOOP)" ;;
-          esac
-          [ "$(g DNS)" = "YES" ] && ok "DNS 解析可用" || bad "DNS 不可用" "dsh 调不了模型 API"
-          case "$(g HTTPS)" in
-            200|301|302) ok "出网 HTTPS 可用" "HTTP $(g HTTPS)" ;;
-            *)           bad "出网 HTTPS 不可用" "HTTP $(g HTTPS)" ;;
-          esac
-          case "$(g GWSVC)" in
-            000|"") ok "经网关回连宿主被阻断" "--no-map-gw 生效" ;;
-            *)      bad "经网关仍能回连宿主" "HTTP $(g GWSVC) @ $(g GWADDR)" ;;
-          esac
-          echo
-
-          echo "=== C. pasta + bwrap 嵌套（真实形态） ==="
-          C_OUT=$(timeout 60 pasta --config-net --no-map-gw -- \
-            $BW --unshare-user --unshare-ipc --unshare-pid --unshare-uts --share-net -- bash -c '
-              echo "LOOP=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/ 2>/dev/null || echo 000)"
-              echo "DNS=$(getent hosts github.com >/dev/null 2>&1 && echo YES || echo NO)"
-              echo "PROCS=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l)"
-            ' 2>&1 || echo "NEST_FAILED")
-          echo "$C_OUT" | sed 's/^/     /'
-          h() { echo "$C_OUT" | sed -n "s/^$1=//p" | head -1; }
-          if echo "$C_OUT" | grep -q NEST_FAILED; then
-            bad "pasta 套 bwrap" "嵌套失败，见上方输出"
-          else
-            case "$(h LOOP)" in
-              000|"") ok "嵌套后宿主回环不可达" ;;
-              *)      bad "嵌套后宿主回环可达" "HTTP $(h LOOP)" ;;
-            esac
-            [ "$(h DNS)" = "YES" ] && ok "嵌套后仍能出网" || bad "嵌套后出网失效"
-            [ -n "$(h PROCS)" ] && [ "$(h PROCS)" -lt 20 ] \
-              && ok "嵌套后 PID 命名空间仍隔离" "$(h PROCS) 个进程" \
-              || bad "嵌套后 PID 未隔离" "$(h PROCS)"
-          fi
-          echo
-
-          echo "=== D. 入站转发：nginx 要能从宿主连到实例 ==="
-          timeout 45 pasta --config-net --no-map-gw -t 13101 -- bash -c '
+          echo "=== 入站转发 + 实例间隔离（最关键） ==="
+          # 员工 B 的实例：只绑宿主回环，nginx 能连，外部网卡连不到
+          timeout 60 pasta --config-net --no-map-gw --no-splice -t 127.0.0.1/13101 -- bash -c '
             python3 -c "
           import http.server
           class H(http.server.BaseHTTPRequestHandler):
               def do_GET(s):
-                  s.send_response(200); s.end_headers(); s.wfile.write(b\"dsh-instance-13101\")
+                  s.send_response(200); s.end_headers(); s.wfile.write(b\"dsh-B\")
               def log_message(*a): pass
           http.server.HTTPServer((\"0.0.0.0\",13101),H).serve_forever()" ' &
-          PASTA_D=$!
-          sleep 6
-          D=$(curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
-          if [ "$D" = "dsh-instance-13101" ]; then
-            ok "宿主可连到沙箱内的实例" "nginx -> dsh 这条路通"
+          PB=$!
+          sleep 7
+          FROM_HOST=$(curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
+          [ "$FROM_HOST" = "dsh-B" ] && ok "nginx（宿主）能连到 B 的实例" \
+                                     || bad "宿主连不到 B 的实例" "收到 '${FROM_HOST:-空}'"
+          FROM_EXT=$(curl -s --max-time 5 "http://$HOSTIP:13101/" 2>/dev/null || echo "")
+          [ -z "$FROM_EXT" ] && ok "B 的实例未暴露在宿主外部网卡上" \
+                             || bad "B 的实例暴露在 $HOSTIP:13101" "收到 '$FROM_EXT'"
+          # 员工 A：另一个沙箱，试图连 B
+          A1=$(timeout 30 pasta --config-net --no-map-gw --no-splice -- \
+                 curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
+          A2=$(timeout 30 env HOSTIP="$HOSTIP" pasta --config-net --no-map-gw --no-splice -- \
+                 bash -c 'curl -s --max-time 5 "http://$HOSTIP:13101/" 2>/dev/null' || echo "")
+          inf "A 经 127.0.0.1 连 B" "收到 '${A1:-空}'"
+          inf "A 经 $HOSTIP 连 B" "收到 '${A2:-空}'"
+          if [ -z "$A1" ] && [ -z "$A2" ]; then
+            ok "员工 A 无法连到员工 B 的实例" "★ 残留风险已封堵"
           else
-            bad "宿主连不到沙箱内的实例" "收到: '${D:-空}' —— nginx 将无法代理"
+            bad "员工 A 仍能连到员工 B 的实例" "★ 未封堵"
           fi
-          echo
-
-          echo "=== E. 关键：员工 A 能否直连员工 B 的实例（当前的残留风险） ==="
-          # B 的实例仍在跑（上一步的 pasta -t 13101）。现在以「员工 A」的身份进沙箱去连它。
-          E=$(timeout 30 pasta --config-net --no-map-gw -- \
-            curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
-          E_HOST=$(curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
-          inf "宿主直连 B 实例（对照）" "${E_HOST:-空}"
-          if [ -z "$E" ]; then
-            ok "员工 A 无法连到员工 B 的实例" "残留风险已封堵"
-          else
-            bad "员工 A 仍能连到员工 B 的实例" "收到: $E"
-          fi
-          kill $PASTA_D 2>/dev/null || true
-          kill $HOSTSVC 2>/dev/null || true
+          kill $PB $HOSTSVC 2>/dev/null || true
 
           echo
           echo "================================================"
           printf '  通过 %d 项，失败 %d 项\n' "$pass" "$fail"
           echo "================================================"
-          {
-            echo "### netns 实验结果"
-            echo "通过 $pass 项，失败 $fail 项"
-          } >> "$GITHUB_STEP_SUMMARY"
-          # 实验性质，不因失败而挂掉 job——要的是结论，不是绿灯
           exit 0
