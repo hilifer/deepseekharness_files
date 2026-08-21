@@ -210,6 +210,11 @@ if [ "$DSH_NETNS" = "1" ]; then
   printf 'nameserver %s\n' "$DSH_DNS_FORWARD" > "$USER_SOCK_DIR/resolv.conf"
   args+=(--bind "$USER_SOCK_DIR" "$USER_SOCK_DIR")
   args+=(--ro-bind "$USER_SOCK_DIR/resolv.conf" /etc/resolv.conf)
+  # 入口脚本必须显式挂进来：沙箱只挂了系统目录、node、DSH_HOME 和工作区，
+  # dsh-runtime/ 不在其中，不挂的话沙箱里根本找不到这个文件。
+  NETNS_ENTRY="$DSH_ROOT/dsh-runtime/dsh-netns-entry.sh"
+  [ -r "$NETNS_ENTRY" ] || die "找不到 netns 入口脚本: $NETNS_ENTRY"
+  args+=(--ro-bind "$NETNS_ENTRY" "$NETNS_ENTRY")
 fi
 
 args+=(--chdir "$WORKSPACE")
@@ -253,4 +258,4 @@ log "启动 $USERNAME: socket=$SOCKET ws=$WORKSPACE (bwrap=$BWRAP, 独立网络�
 # bwrap 在 pasta 的 netns 里用 --share-net（共享的是 pasta 的，不是宿主的）。
 exec pasta --config-net --no-map-gw -t none -u none \
   --dns-forward "$DSH_DNS_FORWARD" -- \
-  "$BWRAP" "${args[@]}" -- bash "$DSH_ROOT/dsh-runtime/dsh-netns-entry.sh"
+  "$BWRAP" "${args[@]}" -- bash "$NETNS_ENTRY"

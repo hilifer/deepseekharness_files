@@ -272,10 +272,13 @@ class NetnsIsolationTest(unittest.TestCase):
                 "DSH_BIN": str(root / "node/bin/dsh"),
                 "DSH_SANDBOX_PASSENV": "WHOAMI", "WHOAMI": who,
             }
+            log = root / f"{who}.log"
+            cls.logs = getattr(cls, "logs", {})
+            cls.logs[who] = log
             cls.procs.append(subprocess.Popen(
                 [str(root / "dsh-runtime/dsh-sandbox.sh"), who, str(cls.PORT),
                  str(root / f"dsh-users/{who}"), str(root / f"ws/{who}")],
-                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=env, stdout=open(log, "wb"), stderr=subprocess.STDOUT,
                 start_new_session=True))
         cls.sock_b = root / "dsh-sockets/B/dsh.sock"
         deadline = time.time() + 25
@@ -284,8 +287,12 @@ class NetnsIsolationTest(unittest.TestCase):
         if not cls.sock_b.exists():
             for proc in cls.procs:
                 proc.terminate()
+            detail = "\n".join(
+                f"--- {who}.log ---\n" + path.read_text(errors="replace")[-1500:]
+                for who, path in sorted(cls.logs.items()) if path.exists())
             raise AssertionError(
-                "netns 模式下实例未在 25 秒内建立 socket: " + str(cls.sock_b))
+                "netns 模式下实例未在 25 秒内建立 socket: "
+                f"{cls.sock_b}\n{detail}")
 
     @classmethod
     def tearDownClass(cls):
