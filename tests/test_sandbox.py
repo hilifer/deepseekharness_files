@@ -281,18 +281,30 @@ class NetnsIsolationTest(unittest.TestCase):
                 env=env, stdout=open(log, "wb"), stderr=subprocess.STDOUT,
                 start_new_session=True))
         cls.sock_b = root / "dsh-sockets/B/dsh.sock"
-        deadline = time.time() + 25
-        while time.time() < deadline and not cls.sock_b.exists():
+        # 只等 socket 文件出现是不够的：socat 一启动就立刻创建 socket，
+        # 而它背后的 dsh 可能还没开始监听，这时请求会拿到空响应。
+        # 必须等到一次真实请求成功为止，否则用例会偶发地红。
+        deadline = time.time() + 40
+        ready = False
+        while time.time() < deadline:
+            if cls.sock_b.exists():
+                probe = subprocess.run(
+                    ["curl", "-s", "--max-time", "3", "--unix-socket",
+                     str(cls.sock_b), "http://x/"],
+                    capture_output=True, text=True)
+                if probe.stdout.strip() == "dsh-B":
+                    ready = True
+                    break
             time.sleep(0.5)
-        if not cls.sock_b.exists():
+        if not ready:
             for proc in cls.procs:
                 proc.terminate()
             detail = "\n".join(
                 f"--- {who}.log ---\n" + path.read_text(errors="replace")[-1500:]
                 for who, path in sorted(cls.logs.items()) if path.exists())
             raise AssertionError(
-                "netns 模式下实例未在 25 秒内建立 socket: "
-                f"{cls.sock_b}\n{detail}")
+                "netns 模式下实例未在 40 秒内就绪（socket 存在与否: "
+                f"{cls.sock_b.exists()}，路径 {cls.sock_b}）\n{detail}")
 
     @classmethod
     def tearDownClass(cls):
