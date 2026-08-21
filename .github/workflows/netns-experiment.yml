@@ -149,18 +149,32 @@ jobs:
 
           echo
           echo "=== 5. nginx 能否 proxy_pass 到 unix socket ==="
+          # 上一轮 502 Permission denied：sudo 起的 nginx worker 跑在 www-data 下，
+          # 而 socket 是 runner:600。本项目的 nginx 是 rootless、与 dsh 同为 ubuntu
+          # 用户，所以这里也用同用户的 rootless nginx 复现真实形态。
+          NGDIR="$RUNNER_TEMP/ng"; mkdir -p "$NGDIR/tmp"
           {
-            printf 'events {}\n'
-            printf 'http {\n  access_log off;\n  server {\n    listen 18099;\n'
+            printf 'daemon on;\npid %s/ng.pid;\nerror_log %s/ng.err;\n' "$NGDIR" "$NGDIR"
+            printf 'events {}\nhttp {\n  access_log off;\n'
+            printf '  client_body_temp_path %s/tmp;\n  proxy_temp_path %s/tmp;\n' "$NGDIR" "$NGDIR"
+            printf '  fastcgi_temp_path %s/tmp;\n  uwsgi_temp_path %s/tmp;\n  scgi_temp_path %s/tmp;\n' "$NGDIR" "$NGDIR" "$NGDIR"
+            printf '  server {\n    listen 18099;\n'
             printf '    location / { proxy_pass http://unix:%s/B.sock:/; }\n' "$SOCKDIR"
             printf '  }\n}\n'
-          } > "$RUNNER_TEMP/ng.conf"
-          sudo nginx -c "$RUNNER_TEMP/ng.conf" -g "pid $RUNNER_TEMP/ng.pid; error_log $RUNNER_TEMP/ng.err;" 2>&1 | sed 's/^/     /' || true
+          } > "$NGDIR/ng.conf"
+          echo "     以 $(whoami) 身份启动 rootless nginx（与 socket 属主一致）"
+          nginx -c "$NGDIR/ng.conf" -p "$NGDIR" 2>&1 | sed 's/^/     /'
           sleep 2
-          VIA=$(curl -s --max-time 5 http://127.0.0.1:18099/ 2>/dev/null || echo "")
-          if [ "$VIA" = "dsh-B" ]; then ok "nginx proxy_pass 到 unix socket 成功"
-          else bad "nginx 经 unix socket 失败" "收到 '${VIA:-空}' $(tail -2 "$RUNNER_TEMP/ng.err" 2>/dev/null | tr '\n' ' ')"; fi
-          sudo nginx -s quit -c "$RUNNER_TEMP/ng.conf" 2>/dev/null || true
+          inf "nginx worker 用户" "$(ps -o user= -C nginx 2>/dev/null | sort -u | tr '\n' ' ')"
+          inf "socket 属主/权限" "$(stat -c '%U:%G %a' "$SOCKDIR/B.sock" 2>/dev/null)"
+          VIA=$(curl -s --max-time 5 http://127.0.0.1:18099/ 2>/dev/null)
+          if [ "$VIA" = "dsh-B" ]; then
+            ok "nginx proxy_pass 到 unix socket 成功" "收到 '$VIA'"
+          else
+            bad "nginx 经 unix socket 失败" "收到 '${VIA:-空}' | $(tail -1 "$NGDIR/ng.err" 2>/dev/null)"
+          fi
+          nginx -c "$NGDIR/ng.conf" -p "$NGDIR" -s quit 2>/dev/null || true
+
           kill $PA $PB $HOSTSVC 2>/dev/null || true
 
           echo
