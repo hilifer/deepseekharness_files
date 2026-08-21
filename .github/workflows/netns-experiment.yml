@@ -1,0 +1,172 @@
+name: netns 隔离实验
+
+# 只在改动本文件时触发（不污染主 CI），也可手动 dispatch。
+# 目的：验证能否给每个 dsh 实例独立网络命名空间，从而封掉
+# 「员工 A 直连员工 B 的 dsh 端口」这条已知残留风险。
+# 本地嵌套容器里 pasta 起不来（非 root uid 映射受限），所以搬到 runner 上做。
+on:
+  push:
+    paths: ['.github/workflows/netns-experiment.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  netns:
+    name: pasta 网络命名空间隔离
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          echo "whoami: $(whoami)  uid=$(id -u)"
+          echo "kernel: $(uname -r)"
+          . /etc/os-release && echo "os: $PRETTY_NAME"
+
+      - name: 安装 bubblewrap 与 passt
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap passt
+          echo "bwrap:  $(bwrap --version)"
+          echo "pasta:  $(pasta --version 2>&1 | head -2 | tr '\n' ' ')"
+
+      - name: 放开非特权 user namespace 限制
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: pasta 支持的相关选项
+        run: pasta --help 2>&1 | grep -iE 'tcp-ports|udp-ports|map-gw|config-net|netns|^ *-[tu] ' || true
+
+      - name: 实验
+        run: |
+          set -u
+          pass=0; fail=0
+          ok()  { printf '  ✅ %-44s %s\n' "$1" "${2:-}"; pass=$((pass+1)); }
+          bad() { printf '  ❌ %-44s %s\n' "$1" "${2:-}"; fail=$((fail+1)); }
+          inf() { printf '  ·  %-44s %s\n' "$1" "${2:-}"; }
+
+          # 宿主上起一个「FileBrowser」，沙箱不该碰得到它
+          python3 -c "
+          import http.server
+          class H(http.server.BaseHTTPRequestHandler):
+              def do_GET(s):
+                  s.send_response(200); s.end_headers(); s.wfile.write(b'HOST-SERVICE')
+              def log_message(*a): pass
+          http.server.HTTPServer(('127.0.0.1',18080),H).serve_forever()" &
+          HOSTSVC=$!
+          sleep 1
+          echo "宿主对照: $(curl -s --max-time 3 http://127.0.0.1:18080/)"
+          echo
+
+          BW="bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --die-with-parent"
+
+          echo "=== A. 现状：bwrap --share-net（共享宿主网络） ==="
+          A_LOOP=$($BW --unshare-all --share-net -- \
+            curl -s --max-time 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:18080/ 2>/dev/null || echo 000)
+          A_NET=$($BW --unshare-all --share-net -- \
+            getent hosts github.com >/dev/null 2>&1 && echo YES || echo NO)
+          if [ "$A_LOOP" = "200" ]; then
+            inf "宿主回环可达" "HTTP $A_LOOP —— 这就是待封堵的残留风险"
+          else
+            inf "宿主回环可达" "HTTP $A_LOOP（意外）"
+          fi
+          inf "出网" "$A_NET"
+          echo
+
+          echo "=== B. pasta 独立网络命名空间（不套 bwrap，先单独验 pasta） ==="
+          B_OUT=$(timeout 60 pasta --config-net --no-map-gw -- bash -c '
+            echo "LOOP=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/ 2>/dev/null || echo 000)"
+            echo "DNS=$(getent hosts github.com >/dev/null 2>&1 && echo YES || echo NO)"
+            echo "HTTPS=$(curl -s --max-time 8 -o /dev/null -w "%{http_code}" https://github.com 2>/dev/null || echo 000)"
+            GW=$(ip route show default 2>/dev/null | awk "{print \$3}" | head -1)
+            echo "GWADDR=$GW"
+            echo "GWSVC=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" http://$GW:18080/ 2>/dev/null || echo 000)"
+            echo "IFACES=$(ip -o -4 addr show 2>/dev/null | awk "{print \$2\"=\"\$4}" | tr "\n" " ")"
+          ' 2>&1 || echo "PASTA_FAILED")
+          echo "$B_OUT" | sed 's/^/     /'
+          g() { echo "$B_OUT" | sed -n "s/^$1=//p" | head -1; }
+          case "$(g LOOP)" in
+            000|"") ok "宿主回环不可达" "沙箱的 127.0.0.1 是它自己的" ;;
+            *)      bad "宿主回环仍可达" "HTTP $(g LOOP)" ;;
+          esac
+          [ "$(g DNS)" = "YES" ] && ok "DNS 解析可用" || bad "DNS 不可用" "dsh 调不了模型 API"
+          case "$(g HTTPS)" in
+            200|301|302) ok "出网 HTTPS 可用" "HTTP $(g HTTPS)" ;;
+            *)           bad "出网 HTTPS 不可用" "HTTP $(g HTTPS)" ;;
+          esac
+          case "$(g GWSVC)" in
+            000|"") ok "经网关回连宿主被阻断" "--no-map-gw 生效" ;;
+            *)      bad "经网关仍能回连宿主" "HTTP $(g GWSVC) @ $(g GWADDR)" ;;
+          esac
+          echo
+
+          echo "=== C. pasta + bwrap 嵌套（真实形态） ==="
+          C_OUT=$(timeout 60 pasta --config-net --no-map-gw -- \
+            $BW --unshare-user --unshare-ipc --unshare-pid --unshare-uts --share-net -- bash -c '
+              echo "LOOP=$(curl -s --max-time 3 -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/ 2>/dev/null || echo 000)"
+              echo "DNS=$(getent hosts github.com >/dev/null 2>&1 && echo YES || echo NO)"
+              echo "PROCS=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l)"
+            ' 2>&1 || echo "NEST_FAILED")
+          echo "$C_OUT" | sed 's/^/     /'
+          h() { echo "$C_OUT" | sed -n "s/^$1=//p" | head -1; }
+          if echo "$C_OUT" | grep -q NEST_FAILED; then
+            bad "pasta 套 bwrap" "嵌套失败，见上方输出"
+          else
+            case "$(h LOOP)" in
+              000|"") ok "嵌套后宿主回环不可达" ;;
+              *)      bad "嵌套后宿主回环可达" "HTTP $(h LOOP)" ;;
+            esac
+            [ "$(h DNS)" = "YES" ] && ok "嵌套后仍能出网" || bad "嵌套后出网失效"
+            [ -n "$(h PROCS)" ] && [ "$(h PROCS)" -lt 20 ] \
+              && ok "嵌套后 PID 命名空间仍隔离" "$(h PROCS) 个进程" \
+              || bad "嵌套后 PID 未隔离" "$(h PROCS)"
+          fi
+          echo
+
+          echo "=== D. 入站转发：nginx 要能从宿主连到实例 ==="
+          timeout 45 pasta --config-net --no-map-gw -t 13101 -- bash -c '
+            python3 -c "
+          import http.server
+          class H(http.server.BaseHTTPRequestHandler):
+              def do_GET(s):
+                  s.send_response(200); s.end_headers(); s.wfile.write(b\"dsh-instance-13101\")
+              def log_message(*a): pass
+          http.server.HTTPServer((\"0.0.0.0\",13101),H).serve_forever()" ' &
+          PASTA_D=$!
+          sleep 6
+          D=$(curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
+          if [ "$D" = "dsh-instance-13101" ]; then
+            ok "宿主可连到沙箱内的实例" "nginx -> dsh 这条路通"
+          else
+            bad "宿主连不到沙箱内的实例" "收到: '${D:-空}' —— nginx 将无法代理"
+          fi
+          echo
+
+          echo "=== E. 关键：员工 A 能否直连员工 B 的实例（当前的残留风险） ==="
+          # B 的实例仍在跑（上一步的 pasta -t 13101）。现在以「员工 A」的身份进沙箱去连它。
+          E=$(timeout 30 pasta --config-net --no-map-gw -- \
+            curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
+          E_HOST=$(curl -s --max-time 5 http://127.0.0.1:13101/ 2>/dev/null || echo "")
+          inf "宿主直连 B 实例（对照）" "${E_HOST:-空}"
+          if [ -z "$E" ]; then
+            ok "员工 A 无法连到员工 B 的实例" "残留风险已封堵"
+          else
+            bad "员工 A 仍能连到员工 B 的实例" "收到: $E"
+          fi
+          kill $PASTA_D 2>/dev/null || true
+          kill $HOSTSVC 2>/dev/null || true
+
+          echo
+          echo "================================================"
+          printf '  通过 %d 项，失败 %d 项\n' "$pass" "$fail"
+          echo "================================================"
+          {
+            echo "### netns 实验结果"
+            echo "通过 $pass 项，失败 $fail 项"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # 实验性质，不因失败而挂掉 job——要的是结论，不是绿灯
+          exit 0
