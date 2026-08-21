@@ -209,7 +209,27 @@ if [ "$DSH_NETNS" = "1" ]; then
   mkdir -p "$USER_SOCK_DIR"; chmod 700 "$USER_SOCK_DIR"
   printf 'nameserver %s\n' "$DSH_DNS_FORWARD" > "$USER_SOCK_DIR/resolv.conf"
   args+=(--bind "$USER_SOCK_DIR" "$USER_SOCK_DIR")
-  args+=(--ro-bind "$USER_SOCK_DIR/resolv.conf" /etc/resolv.conf)
+
+  # 沙箱里的 DNS 必须指向 pasta 的转发器，否则解析会打到宿主的 stub resolver
+  # （127.0.0.53），而那个地址在实例自己的 netns 里没人监听。
+  #
+  # 坑：Ubuntu 的 /etc/resolv.conf 是指向 /run/systemd/resolve/... 的符号链接。
+  # /etc 被挂成只读，直接 --ro-bind 到 /etc/resolv.conf 会因为链接悬空、
+  # 又无法在只读的 /etc 里造挂载点而失败：
+  #   bwrap: Can't create file at /etc/resolv.conf: No such file or directory
+  # 所以要按链接的真实目标来挂，并给目标所在的目录先铺一层 tmpfs。
+  resolv_target=$(readlink -f /etc/resolv.conf 2>/dev/null || true)
+  if [ -z "$resolv_target" ] || [ "$resolv_target" = "/etc/resolv.conf" ]; then
+    args+=(--ro-bind "$USER_SOCK_DIR/resolv.conf" /etc/resolv.conf)
+  elif [ "${resolv_target#/run/}" != "$resolv_target" ]; then
+    # 链接指向 /run 下（systemd-resolved 的常见形态）。tmpfs 是可写的，
+    # bwrap 会自动补出中间目录，顺带也把宿主的 /run 挡在外面。
+    args+=(--tmpfs /run)
+    args+=(--ro-bind "$USER_SOCK_DIR/resolv.conf" "$resolv_target")
+  else
+    die "/etc/resolv.conf 指向 $resolv_target，无法在沙箱内改写它。
+       请把 DSH_DNS_FORWARD 的地址直接写进宿主的 resolv.conf，或改用 DSH_NETNS=0。"
+  fi
   # 入口脚本必须显式挂进来：沙箱只挂了系统目录、node、DSH_HOME 和工作区，
   # dsh-runtime/ 不在其中，不挂的话沙箱里根本找不到这个文件。
   NETNS_ENTRY="$DSH_ROOT/dsh-runtime/dsh-netns-entry.sh"
