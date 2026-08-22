@@ -165,6 +165,13 @@ python3 -m unittest discover -s tests -v
   `0.0.0.0`——若是后者，直连实例端口可完全绕过 SSO
 - 用户名/姓名/部门经白名单校验后才写入 YAML、nginx 配置和文件路径
 
+> **隔离机制的选型正在重新评估**，见 [DESIGN.md](DESIGN.md)。
+> 现有的 bubblewrap 方案要求内核放行非特权 user namespace，而这个开关在宿主机上、
+> 容器内改不了——与本项目「rootless 容器部署」的前提相冲突。现场部署下来隔离
+> 一直没生效，实例以 `DSH_ALLOW_UNCONFINED=1` 无隔离运行。
+> DESIGN.md 里列了三条可行路线及各自的前提，其中「容器内一员工一 OS 用户」
+> 只需要容器内 root，不求宿主配合。
+
 ### 工作区隔离（两层）
 
 | 层 | 机制 | 挡得住什么 |
@@ -234,6 +241,13 @@ python3 -m unittest discover -s tests -v
   未显式指定，首次部署请用 `ss -ltnp | grep -E '3080|1310'` 确认是 `127.0.0.1` 而非
   `0.0.0.0`——若是后者，直连实例端口可完全绕过 SSO
 - 用户名/姓名/部门经白名单校验后才写入 YAML、nginx 配置和文件路径
+
+> **隔离机制的选型正在重新评估**，见 [DESIGN.md](DESIGN.md)。
+> 现有的 bubblewrap 方案要求内核放行非特权 user namespace，而这个开关在宿主机上、
+> 容器内改不了——与本项目「rootless 容器部署」的前提相冲突。现场部署下来隔离
+> 一直没生效，实例以 `DSH_ALLOW_UNCONFINED=1` 无隔离运行。
+> DESIGN.md 里列了三条可行路线及各自的前提，其中「容器内一员工一 OS 用户」
+> 只需要容器内 root，不求宿主配合。
 
 ### 工作区隔离（两层）
 
