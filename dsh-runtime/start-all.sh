@@ -3,10 +3,12 @@
 # 全栈幂等启动入口（容器 entrypoint 调用）
 #   密钥 -> authelia -> nginx -> filebrowser -> 管理后台 -> 各 dsh 实例
 #
-# 所有 dsh 实例（含 admin）一律经 dsh-sandbox.sh 在 bubblewrap 里启动，
-# 每个实例只能看到自己的工作区。沙箱不可用时【不启动任何实例】，
-# 而不是退回无隔离运行——宁可服务不可用，也不让全公司文件敞开。
+# 所有 dsh 实例（含 admin）一律经 dsh-sandbox.sh 启动。它会按【这台机器实际
+# 拿得到什么】挑隔离档位：独立容器 > bubblewrap 挂载命名空间 > 独立 OS 用户，
+# 一档都挑不出来时【不启动任何实例】，而不是退回无隔离运行——
+# 宁可服务不可用，也不让全公司文件敞开。
 # 排障可用 DSH_ALLOW_UNCONFINED=1 显式放行（会大声告警）。
+# 当前机器选了哪一档、为什么: dsh-runtime/dsh-sandbox.sh --report
 #
 # 用户清单来自 dsh-users/registry.json（管理后台维护）。
 # 旧的 ports.json 会在首次读取时自动迁移，之后由 core.py 保持同步。
@@ -28,17 +30,19 @@ is_up() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 "$DSH_ROOT/scripts/fb-start.sh" start
 "$DSH_ROOT/admin/admin-start.sh" start
 
-# 2) 沙箱自检——决定要不要启动 dsh 实例
+# 2) 隔离自检——决定要不要启动 dsh 实例
 if "$SANDBOX" --check >/dev/null 2>&1; then
   SANDBOX_OK=1
+  echo "隔离后端: $("$SANDBOX" --backend 2>/dev/null || echo unknown)"
 else
   SANDBOX_OK=0
   echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-  echo "!! 沙箱不可用，所有 dsh 实例【不予启动】。                        !!"
-  echo "!! 修复: $DSH_ROOT/scripts/install-bubblewrap.sh                   !!"
-  echo "!! 验证: $DSH_ROOT/scripts/preflight-sandbox.sh                    !!"
+  echo "!! 挑不出隔离后端，所有 dsh 实例【不予启动】。                    !!"
+  echo "!! 逐项原因: $DSH_ROOT/dsh-runtime/dsh-sandbox.sh --report         !!"
+  echo "!! 验证:     $DSH_ROOT/scripts/preflight-sandbox.sh                !!"
   echo "!! 排障放行(危险): DSH_ALLOW_UNCONFINED=1 $0                       !!"
   echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+  "$SANDBOX" --report 2>&1 | sed 's/^/   /'
   [ "${DSH_ALLOW_UNCONFINED:-0}" = "1" ] && SANDBOX_OK=1
 fi
 
@@ -98,5 +102,5 @@ for entry in "authelia:$DSH_ROOT/dsh-auth/authelia.pid" \
   name="${entry%%:*}"; pidfile="${entry#*:}"
   if is_up "$pidfile"; then echo "$name: UP (pid $(cat "$pidfile"))"; else echo "$name: DOWN"; fi
 done
-echo "沙箱(bubblewrap): $($SANDBOX --check 2>&1 | tail -1)"
+echo "隔离: $($SANDBOX --check 2>&1 | tail -1)"
 python3 "$DSH_ROOT/admin/cli.py" list 2>/dev/null || echo "（登记表为空或管理后台未就绪）"

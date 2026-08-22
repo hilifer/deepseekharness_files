@@ -157,6 +157,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/api/health" and method == "GET":
             ok, detail = ENGINE.sandbox_available()
             self._json(200, {"sandbox_ok": ok, "sandbox_detail": detail,
+                             "backend": ENGINE.isolation_backend(),
                              "admin_users": sorted(ADMIN_USERS), "actor": actor})
             return
 
@@ -212,9 +213,10 @@ def main():
               file=sys.stderr)
         sys.exit(1)
     ok, detail = ENGINE.sandbox_available()
-    print(f"[admin] 沙箱自检: {'可用' if ok else '不可用'} — {detail}", file=sys.stderr)
+    print(f"[admin] 隔离自检: {'可用' if ok else '不可用'} — {detail}", file=sys.stderr)
     if not ok:
-        print("[admin] 警告：沙箱不可用时将拒绝建号。先跑 scripts/install-bubblewrap.sh", file=sys.stderr)
+        print("[admin] 警告：挑不出隔离后端时将拒绝建号。"
+              "逐项原因: dsh-runtime/dsh-sandbox.sh --report", file=sys.stderr)
     print(f"[admin] 监听 http://{LISTEN_HOST}:{LISTEN_PORT}/admin/  管理员={sorted(ADMIN_USERS)}",
           file=sys.stderr)
     ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler).serve_forever()

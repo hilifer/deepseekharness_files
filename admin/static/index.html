@@ -34,6 +34,7 @@ button.sm{padding:4px 9px;font-size:12.5px;border-radius:6px}
 .banner{padding:11px 14px;border-radius:9px;margin-bottom:16px;border:1px solid;font-size:13.5px}
 .banner.ok{background:color-mix(in srgb,var(--ok) 9%,transparent);border-color:color-mix(in srgb,var(--ok) 35%,transparent)}
 .banner.bad{background:color-mix(in srgb,var(--danger) 9%,transparent);border-color:color-mix(in srgb,var(--danger) 40%,transparent)}
+.banner.warn{background:color-mix(in srgb,var(--warn) 10%,transparent);border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
 .panel{background:var(--panel);border:1px solid var(--border);border-radius:11px;box-shadow:var(--shadow);overflow:hidden}
 .tablewrap{overflow-x:auto}
 table{border-collapse:collapse;width:100%;min-width:840px}
@@ -160,19 +161,45 @@ let USERS = [];
 const LABELS = {authelia:'Authelia 账号', nginx:'nginx 路由',
                 filebrowser:'FileBrowser 权限', dsh:'dsh 实例', workspace:'工作区目录'};
 
+// 隔离档位由 dsh-sandbox.sh 按当前机器实际拿得到的能力自动挑选，
+// 换机器（宿主 / 普通容器 / 特权容器）时会变。这里如实标出当前是哪一档，
+// 以及那一档【做不到】什么——不能让人以为四档等价。
+const BACKENDS = {
+  container: {cls:'ok', title:'✅ 工作区隔离已生效（独立容器）',
+    body:'每个 dsh 实例跑在自己的容器里：独立挂载/网络/进程命名空间 + 独立 UID + 资源限额，' +
+         '工作区以外的路径在实例内不存在，员工之间也连不到彼此的实例。'},
+  bwrap:     {cls:'ok', title:'✅ 工作区隔离已生效（bubblewrap 挂载命名空间）',
+    body:'工作区以外的路径在实例内根本不存在，用绝对路径也读不到。' +
+         '注意默认与宿主共享网络命名空间，员工可直连他人的实例端口；' +
+         '要封死这条需开 DSH_NETNS=1，或换用独立容器档。'},
+  uid:       {cls:'warn', title:'⚠️ 当前是最弱的一档（独立 OS 用户 + 文件权限）',
+    body:'员工之间读不到彼此的文件，但【没有】进程与网络隔离：ps 能看到全机进程，' +
+         '员工可直连他人的实例端口。这台机器既没有可用的 docker、也开不出命名空间才会落到这一档。'},
+  none:      {cls:'bad', title:'🚨 无隔离运行中（DSH_ALLOW_UNCONFINED=1）',
+    body:'每个 dsh 实例都能读写整台服务器的文件，包括其他部门的文件、Authelia 用户库和 TLS 私钥。' +
+         '这只应出现在排障时，请尽快恢复隔离。'},
+};
+function bannerFor(health) {
+  if (!health.sandbox_ok) {
+    return `<div class="banner bad"><b>⚠️ 挑不出隔离后端，已停止建号。</b>
+       当前若有实例在跑，它们能读写整台服务器的文件（包括其他部门的文件和明文初始密码）。
+       逐项原因与处理建议：<code>dsh-runtime/dsh-sandbox.sh --report</code>，
+       修好后用 <code>scripts/preflight-sandbox.sh</code> 验证。
+       <br><code>${esc(health.sandbox_detail)}</code></div>`;
+  }
+  const b = BACKENDS[health.backend] ||
+            {cls:'warn', title:`隔离后端：${esc(health.backend||'未知')}`, body:''};
+  return `<div class="banner ${b.cls}">${b.title}。${b.body}
+     <code>${esc(health.sandbox_detail)}</code></div>`;
+}
+
 async function load() {
   try {
     const [health, data] = await Promise.all([
       api('GET', '/admin/api/health'), api('GET', '/admin/api/users')
     ]);
     $('#who').textContent = `当前登录：${health.actor}`;
-    $('#banner').innerHTML = health.sandbox_ok
-      ? `<div class="banner ok">✅ 工作区隔离已生效（bubblewrap）。每个 dsh 实例只能看到自己的工作区，
-         其余路径在实例内不存在。<code>${esc(health.sandbox_detail)}</code></div>`
-      : `<div class="banner bad"><b>⚠️ 沙箱不可用，已停止建号。</b>
-         当前若有实例在跑，它们能读写整台服务器的文件（包括其他部门的文件和明文初始密码）。
-         请先执行 <code>scripts/install-bubblewrap.sh</code>，再用
-         <code>scripts/preflight-sandbox.sh</code> 验证。<br><code>${esc(health.sandbox_detail)}</code></div>`;
+    $('#banner').innerHTML = bannerFor(health);
     USERS = data.users;
     render();
   } catch (e) {

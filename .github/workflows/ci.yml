@@ -83,34 +83,10 @@ jobs:
           fi
 
       - name: 搭一棵仿真部署树
-        run: |
-          set -eu
-          R="$HOME/fakedeploy"
-          mkdir -p "$R"/{dsh-auth/config,nginx/certs,filebrowser,admin,dsh-runtime,scripts,node/bin}
-          mkdir -p "$R"/dsh-files/departments/{研发部/{张三,赵六},财务部/王五}
-          mkdir -p "$R"/dsh-users/{zhangsan,zhaoliu} "$R"/.local/share/dsh/profiles
-          echo '全员明文初始密码' > "$R/dsh-auth/initial-credentials.txt"
-          echo 'users: {}'       > "$R/dsh-auth/config/users_database.yml"
-          echo 'PRIVKEY'         > "$R/nginx/certs/dsh.key"
-          echo 'SQLITE'          > "$R/filebrowser/database.db"
-          echo 'deadbeef'        > "$R/admin/.admin-token"
-          echo '财务机密'         > "$R/dsh-files/departments/财务部/王五/工资表.xlsx"
-          cp admin/core.py admin/cli.py "$R/admin/"
-          cp dsh-runtime/dsh-sandbox.sh "$R/dsh-runtime/"
-          cp scripts/preflight-sandbox.sh "$R/scripts/"
-          cp /bin/bash "$R/node/bin/node"
-          python3 - "$R" <<'PY'
-          import json, sys
-          from pathlib import Path
-          root = Path(sys.argv[1])
-          users = {}
-          for name, py, port in (("张三", "zhangsan", 13101), ("赵六", "zhaoliu", 13102)):
-              users[py] = {"username": py, "name": name, "department": "研发部",
-                           "role": "员工", "port": port,
-                           "workspace": str(root / "dsh-files/departments/研发部" / name)}
-          (root / "dsh-users/registry.json").write_text(
-              json.dumps({"version": 1, "users": users}, ensure_ascii=False, indent=2))
-          PY
+        # 树的内容由 scripts/make-fake-deploy.sh 统一负责：隔离层现在是
+        # 「调度器 + backends/ 下四个后端 + 容器入口脚本」，在 CI 里手抄一份
+        # 拷贝清单，迟早会漏掉某个文件、而且只在运行时才炸。
+        run: scripts/make-fake-deploy.sh "$HOME/fakedeploy" "$PWD"
 
       - name: 跑隔离验收（preflight）
         # 这一步同时也是 preflight 脚本自身的冒烟测试：它有 bash 错误就会在这里暴露。
@@ -365,3 +341,109 @@ jobs:
           R=/home/robot
           cd "$R" && DSH_ROOT="$R" python3 -m unittest tests.test_sandbox.SandboxIsolationTest
           echo "✅ 沙箱在新根下同样生效"
+
+  env-matrix:
+    # ------------------------------------------------------------------
+    # 环境形状矩阵 —— 这个项目要能跑在【任何形状的机器】上，不能只在某一台
+    # 上验过就算数。这里用不同的 `docker run` 参数把同一套验收脚本丢进几种
+    # 真实会遇到的形状里跑，逐个断言：
+    #   1 调度器在这个形状下挑对了档
+    #   2 挑中的那一档【真的隔离住了】（跑完整 preflight，读不到才算过）
+    #   3 一档都挑不出来时确实拒绝启动，而不是悄悄裸跑
+    # 其中「非 root + 挂了宿主 docker socket」就是现场那台机器的形状。
+    # ------------------------------------------------------------------
+    name: 环境形状 ${{ matrix.shape }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shape: 容器·非root·无命名空间·无docker
+            expect: refuse
+            args: ''
+            nonroot: 'yes'
+            block_userns: '1'
+            need_image: 'no'
+          - shape: 容器·root·无命名空间·无docker
+            expect: uid
+            args: ''
+            nonroot: 'no'
+            block_userns: '1'
+            need_image: 'no'
+          - shape: 容器·非root·无命名空间·挂了宿主docker-socket
+            expect: container
+            args: '-v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker:ro'
+            nonroot: 'yes'
+            block_userns: '1'
+            need_image: 'yes'
+          - shape: 容器·root·特权
+            expect: bwrap
+            args: '--privileged'
+            nonroot: 'no'
+            block_userns: '0'
+            need_image: 'no'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 保持宿主的 userns 限制开着
+        # Ubuntu 24.04 的默认状态就是 1。容器形状要模拟的正是「宿主不配合、
+        # 容器内改不了」，所以这里不放开——放开了就等于把待验的前提抹掉。
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
+            cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          else
+            echo "（本 runner 没有这个开关）"
+          fi
+
+      - name: 造一个带依赖的形状基础镜像
+        # 形状容器要以非 root 跑（那才是真实部署的样子），非 root 装不了包，
+        # 所以依赖预先烤进镜像。
+        run: |
+          cat > "$RUNNER_TEMP/Dockerfile.shape" <<'DOCKERFILE'
+          FROM ubuntu:24.04
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+                bash python3 bubblewrap socat curl iproute2 acl \
+                passwd util-linux findutils coreutils ca-certificates \
+           && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+          docker build -t ci-shape:base -f "$RUNNER_TEMP/Dockerfile.shape" "$RUNNER_TEMP"
+
+      - name: 构建实例镜像（只有 container 形状需要）
+        if: matrix.need_image == 'yes'
+        run: DSH_ROOT="$PWD" scripts/build-dsh-image.sh
+
+      - name: 跑形状验收
+        run: |
+          # 默认 shell 是 bash -e，没有 pipefail —— 不加的话形状验收失败会被
+          # 管道末端的 tee 吞掉，job 假绿。
+          set -euo pipefail
+          ARGS="${{ matrix.args }}"
+          if [ "${{ matrix.nonroot }}" = "yes" ]; then
+            # 以 runner 自己的 uid 跑：既是「非 root」，又能写得动挂进去的工作区
+            ARGS="$ARGS --user $(id -u):$(id -g)"
+            if [ -S /var/run/docker.sock ]; then
+              ARGS="$ARGS --group-add $(stat -c %g /var/run/docker.sock)"
+            fi
+          fi
+          # 刻意把仓库挂到【和宿主不同的路径】/deploy 上：容器后端必须自己
+          # 算出「/deploy/... 在宿主上是 $PWD/...」才能挂对，路径同构就验不到了。
+          # shellcheck disable=SC2086
+          docker run --rm \
+            -v "$PWD:/deploy" -w /deploy \
+            -e REPO=/deploy \
+            -e "SHAPE_BLOCK_USERNS=${{ matrix.block_userns }}" \
+            $ARGS \
+            ci-shape:base \
+            bash /deploy/tests/env-shape.sh "${{ matrix.expect }}" /deploy/fakedeploy \
+            2>&1 | tee "$RUNNER_TEMP/shape.txt"
+
+      - name: 结果写进 job summary
+        if: always()
+        run: |
+          {
+            echo "### 形状 ${{ matrix.shape }}（期望 ${{ matrix.expect }}）"
+            echo '```'
+            cat "$RUNNER_TEMP/shape.txt" 2>/dev/null || echo "（没有输出）"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

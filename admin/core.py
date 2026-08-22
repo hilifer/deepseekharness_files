@@ -680,11 +680,26 @@ class Engine:
         time.sleep(1)
         self.dsh_start(username, rec)
 
+    def _sandbox_env(self) -> dict:
+        return {"DSH_NETNS": "1" if self.cfg.netns else "0",
+                "DSH_ROOT": str(self.cfg.root)}
+
     def sandbox_available(self) -> tuple[bool, str]:
-        res = self.run.run([str(self.cfg.sandbox_sh), "--check"], timeout=30,
-                           env={"DSH_NETNS": "1" if self.cfg.netns else "0",
-                                "DSH_ROOT": str(self.cfg.root)})
+        """当前环境挑不挑得出隔离后端。挑不出就不建号、不起实例（fail-closed）。"""
+        res = self.run.run([str(self.cfg.sandbox_sh), "--check"], timeout=60,
+                           env=self._sandbox_env())
         return res.returncode == 0, (res.stdout or res.stderr).strip()
+
+    def isolation_backend(self) -> str:
+        """选中的隔离档位: container / bwrap / uid / none / unknown。
+
+        由 dsh-sandbox.sh 按当前环境实际拿得到的能力挑选，机器换形状（宿主 ->
+        容器 -> 特权容器）时这里会跟着变，不需要改配置。
+        """
+        res = self.run.run([str(self.cfg.sandbox_sh), "--backend"], timeout=60,
+                           env=self._sandbox_env())
+        name = (res.stdout or "").strip()
+        return name if res.returncode == 0 and name else "unknown"
 
     # ---------------- DSH_HOME 播种 ----------------
     def _seed_dsh_home(self, username: str, name: str, workspace: Path) -> None:
@@ -783,8 +798,9 @@ class Engine:
         ok, detail = self.sandbox_available()
         if not ok:
             raise ProvisionError(
-                f"沙箱不可用，拒绝建号（否则新实例将不受隔离）: {detail}\n"
-                "请先运行 scripts/install-bubblewrap.sh 并用 scripts/preflight-sandbox.sh 验证。")
+                f"挑不出隔离后端，拒绝建号（否则新实例将不受隔离）: {detail}\n"
+                "逐项原因与处理建议: dsh-runtime/dsh-sandbox.sh --report\n"
+                "验证: scripts/preflight-sandbox.sh")
 
         password = password or generate_password()
         workspace = self.workspace_for(department, name)

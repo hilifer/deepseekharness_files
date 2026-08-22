@@ -52,7 +52,11 @@ class FakeRunner:
         argv_s = " ".join(argv)
         if "--check" in argv and "dsh-sandbox.sh" in argv_s:
             rc = 0 if self.sandbox_ok else 1
-            return subprocess.CompletedProcess(argv, rc, "OK /usr/bin/bwrap" if rc == 0 else "MISSING", "")
+            return subprocess.CompletedProcess(
+                argv, rc, "OK bwrap bwrap=/usr/bin/bwrap mode=userns" if rc == 0 else "UNAVAILABLE", "")
+        if "--backend" in argv and "dsh-sandbox.sh" in argv_s:
+            rc = 0 if self.sandbox_ok else 1
+            return subprocess.CompletedProcess(argv, rc, "bwrap" if rc == 0 else "", "")
         if "crypto" in argv and "hash" in argv:
             pw = argv[argv.index("--password") + 1]
             return subprocess.CompletedProcess(argv, 0, f"Digest: $argon2id$v=19$m=65536,t=3,p=4$FAKE${len(pw)}\n", "")
@@ -304,7 +308,7 @@ class TestCreate(TempCase):
         self.runner.sandbox_ok = False
         with self.assertRaises(ProvisionError) as ctx:
             self.engine.create_user("zhangsan", "张三", "研发部", "员工")
-        self.assertIn("沙箱不可用", str(ctx.exception))
+        self.assertIn("挑不出隔离后端", str(ctx.exception))
         self.assertNotIn("zhangsan", core.parse_users_yaml(
             self.cfg.auth_users.read_text(encoding="utf-8")), "失败时不得留下半个账号")
 

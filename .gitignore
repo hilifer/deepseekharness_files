@@ -28,3 +28,8 @@ bwrap/
 # Python
 __pycache__/
 *.pyc
+# CI 形状矩阵在仓库里搭的仿真部署树
+fakedeploy/
+# 隔离调度器的运行期缓存
+dsh-runtime/.backend
+dsh-runtime/.pathmap-verified

@@ -470,7 +470,12 @@ class ExtraMountsTest(unittest.TestCase):
 
 
 class SandboxFailClosedTest(unittest.TestCase):
-    """沙箱不可用时必须拒绝启动，而不是退回无隔离运行。"""
+    """挑不出隔离后端时必须拒绝启动，而不是退回无隔离运行。
+
+    这些用例一律用 DSH_ISOLATION 把后端钉死。自动挑选是分档择优的：
+    bwrap 坏掉时它会往下落到 uid/none，那是设计如此；这里要验的是
+    「某一档自己失败时说不说得清、拦不拦得住」，所以不能让它落档。
+    """
 
     @staticmethod
     def _fake_root(tmp: Path) -> Path:
@@ -479,36 +484,66 @@ class SandboxFailClosedTest(unittest.TestCase):
         (tmp / "home").mkdir()
         return tmp
 
-    def test_broken_bwrap_can_reach_the_override(self):
-        """bwrap 装着但跑不起来时，降级开关必须够得到。
+    def _run(self, root: Path, env: dict) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [str(SANDBOX), "u", "13101", str(root / "home"), str(root / "ws")],
+            capture_output=True, text=True, timeout=60,
+            env={**os.environ, "DSH_ROOT": str(root),
+                 "DSH_NODE_ROOT": str(root / "node"), **env})
+
+    def test_broken_bwrap_is_diagnosed_not_silently_skipped(self):
+        """bwrap 装着但跑不起来时，报错要说清是「跑不起来」而不是「没找到」。
 
         早先 find_bwrap 只判可执行，「存在但坏」会走进沙箱分支反复失败、
-        实例直接死掉，DSH_ALLOW_UNCONFINED 压根到不了——现场只能把 bwrap
-        改名骗过检测才能启动。
+        实例直接死掉，降级开关压根到不了——现场只能把 bwrap 改名骗过检测。
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = self._fake_root(Path(tmp))
             broken = root / "brokenbw"
             broken.write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
             broken.chmod(0o755)
-            env = {**os.environ, "BWRAP_BIN": str(broken), "DSH_ROOT": str(root),
-                   "DSH_NODE_ROOT": str(root / "node")}
-
-            # 不放行：拒绝，且要说清是「跑不起来」而不是「没找到」
-            res = subprocess.run(
-                [str(SANDBOX), "u", "13101", str(root / "home"), str(root / "ws")],
-                capture_output=True, text=True, timeout=60, env=env)
+            res = self._run(root, {"BWRAP_BIN": str(broken), "DSH_ISOLATION": "bwrap"})
             self.assertNotEqual(res.returncode, 0)
             self.assertIn("跑不起来", res.stderr)
 
-            # 放行：应真的降级启动
-            env2 = {**env, "DSH_ALLOW_UNCONFINED": "1",
-                    "DSH_NODE_BIN": "/bin/echo", "DSH_BIN": "DSH"}
-            res2 = subprocess.run(
-                [str(SANDBOX), "u", "13101", str(root / "home"), str(root / "ws")],
-                capture_output=True, text=True, timeout=60, env=env2)
-            self.assertEqual(res2.returncode, 0, res2.stderr[-500:])
-            self.assertIn("无隔离启动", res2.stderr)
+    def test_missing_bwrap_says_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_root(Path(tmp))
+            res = self._run(root, {"BWRAP_BIN": str(root / "nope"),
+                                   "DSH_ISOLATION": "bwrap"})
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("未找到 bwrap", res.stderr)
+
+    def test_refuses_to_start_when_no_backend_available(self):
+        """一档都挑不出来时必须拒绝，且把逐项原因摊开。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_root(Path(tmp))
+            # 故意不含 uid：本用例要验的是「一档都不成立」，而在以 root 跑的
+            # 环境里 uid 档是真的可用的，带上它就验不到拒绝路径了。
+            res = self._run(root, {"BWRAP_BIN": str(root / "nope"),
+                                   "DSH_ISOLATION": "bwrap none",
+                                   "DSH_DOCKER_BIN": str(root / "nodocker")})
+            self.assertNotEqual(res.returncode, 0, "挑不出后端时必须拒绝启动")
+            self.assertIn("拒绝启动", res.stderr)
+            self.assertIn("bwrap", res.stderr)
+
+    def test_unconfined_requires_explicit_optin(self):
+        """none 后端不显式放行就不能用——默认必须是 fail-closed。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_root(Path(tmp))
+            res = self._run(root, {"DSH_ISOLATION": "none"})
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("拒绝启动", res.stderr)
+
+    def test_explicit_override_is_loud(self):
+        """DSH_ALLOW_UNCONFINED=1 可以放行，但必须打出醒目告警。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_root(Path(tmp))
+            res = self._run(root, {"DSH_ISOLATION": "none",
+                                   "DSH_ALLOW_UNCONFINED": "1",
+                                   "DSH_NODE_BIN": "/bin/true", "DSH_BIN": "ignored"})
+            self.assertEqual(res.returncode, 0, res.stderr[-500:])
+            self.assertIn("无隔离启动", res.stderr)
 
     def test_downgrade_passes_every_trusted_host(self):
         """降级路径也要传全部 trusted-host。
@@ -518,66 +553,91 @@ class SandboxFailClosedTest(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = self._fake_root(Path(tmp))
-            broken = root / "brokenbw"
-            broken.write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
-            broken.chmod(0o755)
-            res = subprocess.run(
-                [str(SANDBOX), "u", "13101", str(root / "home"), str(root / "ws")],
-                capture_output=True, text=True, timeout=60,
-                env={**os.environ, "BWRAP_BIN": str(broken), "DSH_ROOT": str(root),
-                     "DSH_NODE_ROOT": str(root / "node"),
-                     "DSH_ALLOW_UNCONFINED": "1",
-                     "DSH_NODE_BIN": "/bin/echo", "DSH_BIN": "DSH",
-                     "DSH_TRUSTED_HOSTS": "a:1 b:2 c:3"})
+            res = self._run(root, {"DSH_ISOLATION": "none",
+                                   "DSH_ALLOW_UNCONFINED": "1",
+                                   "DSH_NODE_BIN": "/bin/echo", "DSH_BIN": "DSH",
+                                   "DSH_TRUSTED_HOSTS": "a:1 b:2 c:3"})
             self.assertEqual(res.stdout.count("--trusted-host"), 3, res.stdout)
             for h in ("a:1", "b:2", "c:3"):
                 self.assertIn(h, res.stdout)
 
-    def test_refuses_to_start_without_bwrap(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "node/bin").mkdir(parents=True)
-            (root / "ws").mkdir()
-            (root / "home").mkdir()
-            # 复制一份去掉硬编码 bwrap 候选路径的启动器，模拟「系统里没有 bwrap」
-            script = SANDBOX.read_text(encoding="utf-8") \
-                .replace('"$DSH_ROOT/bwrap/usr/bin/bwrap" \\', '"/nope1" \\') \
-                .replace("/usr/bin/bwrap /bin/bwrap", "/nope2 /nope3")
-            fake = root / "sb.sh"
-            fake.write_text(script, encoding="utf-8")
-            fake.chmod(0o755)
 
-            env = {**os.environ, "PATH": str(root / "empty"),
-                   "DSH_ROOT": str(root), "DSH_NODE_ROOT": str(root / "node")}
-            env.pop("BWRAP_BIN", None)
-            res = subprocess.run([str(fake), "u", "13101", str(root / "home"), str(root / "ws")],
-                                 capture_output=True, text=True, timeout=30, env=env)
-            self.assertNotEqual(res.returncode, 0, "无沙箱时必须拒绝启动")
-            self.assertIn("拒绝", res.stderr)
+class BackendSelectionTest(unittest.TestCase):
+    """调度器按【当前环境实际拿得到什么】挑后端——这一层本身也要有回归。"""
 
-    def test_explicit_override_is_loud(self):
-        """DSH_ALLOW_UNCONFINED=1 可以放行，但必须打出醒目告警。"""
+    def _report(self, env: dict) -> subprocess.CompletedProcess:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "node/bin").mkdir(parents=True)
-            (root / "ws").mkdir()
-            (root / "home").mkdir()
-            script = SANDBOX.read_text(encoding="utf-8") \
-                .replace('"$DSH_ROOT/bwrap/usr/bin/bwrap" \\', '"/nope1" \\') \
-                .replace("/usr/bin/bwrap /bin/bwrap", "/nope2 /nope3")
-            fake = root / "sb.sh"
-            fake.write_text(script, encoding="utf-8")
-            fake.chmod(0o755)
-            (root / "empty").mkdir()
-            env = {**os.environ, "PATH": str(root / "empty"),
-                   "DSH_ALLOW_UNCONFINED": "1", "DSH_ROOT": str(root),
-                   "DSH_NODE_ROOT": str(root / "node"), "DSH_NODE_BIN": "/bin/true",
-                   "DSH_BIN": "ignored"}
-            env.pop("BWRAP_BIN", None)
-            res = subprocess.run([str(fake), "u", "13101", str(root / "home"), str(root / "ws")],
-                                 capture_output=True, text=True, timeout=30, env=env)
-            self.assertIn("警告", res.stderr)
-            self.assertIn("无隔离", res.stderr)
+            return subprocess.run(
+                [str(SANDBOX), "--report"], capture_output=True, text=True, timeout=90,
+                env={**os.environ, "DSH_ROOT": tmp, **env})
+
+    def _backend(self, env: dict) -> subprocess.CompletedProcess:
+        with tempfile.TemporaryDirectory() as tmp:
+            return subprocess.run(
+                [str(SANDBOX), "--backend"], capture_output=True, text=True, timeout=90,
+                env={**os.environ, "DSH_ROOT": tmp, **env})
+
+    def test_report_lists_every_backend(self):
+        res = self._report({})
+        for b in ("container", "bwrap", "uid", "none"):
+            self.assertIn(b, res.stdout, res.stdout)
+
+    def test_report_states_environment_shape(self):
+        """报告要把决定成败的那几项前提摊开，运维不该去读代码才知道为什么。"""
+        res = self._report({})
+        for key in ("跑在容器里", "非特权 userns", "CAP_SYS_ADMIN", "docker"):
+            self.assertIn(key, res.stdout, res.stdout)
+
+    @unittest.skipUnless(BWRAP_OK, "需要可用的 bubblewrap")
+    def test_auto_prefers_bwrap_over_uid(self):
+        """docker 不可用时，有 bwrap 就绝不该退到只有 DAC 的 uid 档。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            res = self._backend({"DSH_DOCKER_BIN": str(Path(tmp) / "nodocker")})
+        self.assertEqual(res.stdout.strip(), "bwrap", res.stderr[-800:])
+
+    def test_unavailable_backend_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            res = self._backend({"DSH_ISOLATION": "none",
+                                 "DSH_DOCKER_BIN": str(Path(tmp) / "nodocker")})
+        self.assertNotEqual(res.returncode, 0)
+
+
+class ContainerPathMapTest(unittest.TestCase):
+    """容器后端的宿主路径换算——挂错了比起不来更难查，必须单测。"""
+
+    def _to_host(self, pathmap: list[str], path: str) -> subprocess.CompletedProcess:
+        script = f'''
+        set -euo pipefail
+        DSH_ROOT=/home/ubuntu
+        BACKEND_TAG=t
+        . "{REPO}/dsh-runtime/backends/common.sh"
+        source_fn() {{ :; }}
+        # 只取 to_host_path 这一段，绕开 probe 里的 docker 依赖
+        eval "$(sed -n '/^to_host_path()/,/^}}/p' "{REPO}/dsh-runtime/backends/container.sh")"
+        PATHMAP=({" ".join(repr(x) for x in pathmap).replace("'", '"')})
+        to_host_path "{path}"
+        '''
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+
+    def test_identity_map(self):
+        res = self._to_host(["/|/"], "/home/ubuntu/dsh-files/a")
+        self.assertEqual(res.stdout.strip(), "/home/ubuntu/dsh-files/a", res.stderr)
+
+    def test_sibling_container_translates_to_host_path(self):
+        """挂了宿主 socket 时，-v 左边必须是宿主上的路径，不是容器内的。"""
+        res = self._to_host(["/home/ubuntu|/srv/dsh"], "/home/ubuntu/dsh-files/研发部")
+        self.assertEqual(res.stdout.strip(), "/srv/dsh/dsh-files/研发部", res.stderr)
+
+    def test_longest_prefix_wins(self):
+        """多条挂载时按最长前缀匹配，否则会挑到范围更大的那条挂错地方。"""
+        res = self._to_host(["/|/hostroot", "/home/ubuntu/dsh-files|/data/files"],
+                            "/home/ubuntu/dsh-files/x")
+        self.assertEqual(res.stdout.strip(), "/data/files/x", res.stderr)
+
+    def test_unmapped_path_fails_instead_of_guessing(self):
+        """映射覆盖不到的路径必须失败——悄悄回落成恒等映射就会挂空目录。"""
+        res = self._to_host(["/home/ubuntu|/srv/dsh"], "/opt/elsewhere")
+        self.assertNotEqual(res.returncode, 0, res.stdout)
 
 
 if __name__ == "__main__":

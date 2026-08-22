@@ -1,6 +1,7 @@
 #!/bin/bash
 # admin 主实例（端口 3080）start/stop/restart。
-# 与员工实例一样经 dsh-sandbox.sh 启动，工作区为整个 dsh-files 根。
+# 与员工实例一样经 dsh-sandbox.sh 启动（隔离档位由它按当前环境自动挑），
+# 工作区为整个 dsh-files 根。
 export PATH="$HOME/node/bin:$PATH"
 DSH_ROOT="${DSH_ROOT:-$HOME}"; export DSH_ROOT
 PIDFILE="$DSH_ROOT/dsh-runtime/dsh.pid"
@@ -11,7 +12,7 @@ start() {
     echo "dsh already running (pid $(cat "$PIDFILE"))"; return 0
   fi
   if ! "$SANDBOX" --check >/dev/null 2>&1; then
-    echo "沙箱不可用，拒绝启动 admin 实例。见 scripts/install-bubblewrap.sh"; return 1
+    echo "挑不出隔离后端，拒绝启动 admin 实例。逐项原因: $SANDBOX --report"; return 1
   fi
   setsid nohup "$SANDBOX" admin 3080 "$DSH_ROOT/.local/share/dsh" "$DSH_ROOT/dsh-files" > "$LOG" 2>&1 &
   echo $! > "$PIDFILE"

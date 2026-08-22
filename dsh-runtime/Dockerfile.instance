@@ -1,0 +1,36 @@
+# =====================================================================
+# 员工 dsh 实例容器的镜像。由 scripts/build-dsh-image.sh 构建。
+#
+# 刻意做成「只有运行时，没有程序本体」：node 与 dsh 由 backends/container.sh
+# 以只读 volume 挂进去。这样升级 dsh 不用重建镜像，镜像也不会随版本膨胀。
+#
+# 基础镜像默认与部署机同族（Ubuntu 24.04）。挂进去的 node 是宿主上那一份，
+# 动态链接的是镜像里的 glibc，基础镜像和部署机差太远会起不来——
+# 换基础镜像时用 BASE 构建参数指定，别改这一行。
+#
+# 这里【绝不】安装 docker 客户端，也不挂 docker socket。
+# 员工的 dsh 是能执行任意命令的 agent，够得到 socket 就是一句话逃逸：
+#   docker run -v /:/host alpine cat /host/etc/shadow
+# 这是容器后端相对 UID 隔离的全部优势所在，唯一必须守住的一条。
+# =====================================================================
+ARG BASE=ubuntu:24.04
+FROM ${BASE}
+
+# socat: 把容器内部端口桥到 0.0.0.0，见 dsh-runtime/dsh-container-entry.sh
+# 其余是 agent 干活常用的基础工具；按需增减，但不要加 docker/podman 客户端。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash socat ca-certificates tzdata locales \
+      git curl unzip less ripgrep python3 python3-venv \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=C.UTF-8 \
+    TZ=Asia/Shanghai
+
+# entry.sh 由 container.sh 以只读 volume 挂到这里
+RUN mkdir -p /opt/dsh
+
+# 不设 ENTRYPOINT：命令行完全由 backends/container.sh 给出，
+# 这样宿主上的 `docker run` 进程 argv 里含有 "dsh web --port <端口> "，
+# core.py 的 pgrep/pkill 与其他后端共用同一套识别方式。
+CMD ["/bin/bash"]

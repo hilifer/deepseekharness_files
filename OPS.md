@@ -194,39 +194,93 @@ dsh --version
 
 分两层，内核层是真边界，UX 层只管好看。
 
-### 第一层（内核）：bubblewrap 挂载命名空间
+### 第一层（内核）：按环境择优的隔离档位
 
-所有 dsh 实例（含 admin）都经 `dsh-runtime/dsh-sandbox.sh` 启动。工作区以外的路径
-**在实例内根本不存在**——不是「没权限」，是那个 inode 不在这个 mount namespace 里，
-所以 dsh 的 bash 工具用绝对路径也读不到。
+所有 dsh 实例（含 admin）都经 `dsh-runtime/dsh-sandbox.sh` 启动。它是**调度器**，
+不是某一种机制：按隔离强度从强到弱逐档探测，挑第一个**在这台机器上真跑得起来**的。
 
-沙箱内可见的全部内容：
+```bash
+/home/ubuntu/dsh-runtime/dsh-sandbox.sh --report   # 先看这个：环境形状 + 逐档为什么行/不行 + 最终选谁
+/home/ubuntu/dsh-runtime/dsh-sandbox.sh --backend  # 只打印档位名
+/home/ubuntu/dsh-runtime/dsh-sandbox.sh --check    # 挑得出=0，挑不出=1（fail-closed）
+/home/ubuntu/scripts/preflight-sandbox.sh          # 逐项实测验收（不看配置，只看能不能读到）
+```
+
+| 档 | 机制 | 前提 | 怎么把前提补上 |
+|----|------|------|--------------|
+| `container` | 每实例一个独立容器 | 够得到 docker 守护进程 | `scripts/build-dsh-image.sh` 构建实例镜像；容器里跑要把宿主 socket 挂进来 |
+| `bwrap` | bubblewrap 挂载命名空间 | 非特权 userns，或容器内 root + CAP_SYS_ADMIN | `scripts/install-bubblewrap.sh`；Ubuntu 24.04+ 还要 `sudo scripts/apparmor-allow-userns.sh` |
+| `uid` | 独立 OS 用户 + 文件权限 | 容器内 root，且**摸不到 docker socket** | 无需准备；部门级权限还需文件系统支持 ACL（`apt-get install acl`） |
+| `none` | 无隔离，仅排障 | `DSH_ALLOW_UNCONFINED=1` | —— |
+
+`DSH_ISOLATION=<档名>` 可以强制指定（也接受空格分隔的候选列表），默认 `auto`。
+
+探测**不看配置也不看版本号，直接跑一次真家伙**：bwrap 真 `--unshare-all` 一次，
+容器档真起一个探针容器去看挂载对不对。「装了但跑不起来」和「没装」一视同仁。
+
+实例内可见的全部内容（三档一致）：
 
 | 挂载 | 内容 |
 |------|------|
 | 只读 | `/usr /bin /sbin /lib* /etc`、`node/`（含 dsh 本体）、共享 `profiles/` |
-| 读写 | 本人 `dsh-users/<user>/`、本人工作区 |
+| 读写 | 本人 `dsh-users/<user>/`、本人工作区（主管另加整个部门目录） |
 | 其他 | `/proc`、`/dev`、私有 `/tmp` |
 
-**不存在**：`dsh-auth/`（全员明文初始密码、用户库）、`nginx/certs/`（TLS 私钥）、
+**碰不到**：`dsh-auth/`（全员明文初始密码、用户库）、`nginx/certs/`（TLS 私钥）、
 `filebrowser/`（权限库）、`admin/`（后台代码与 token）、`dsh-users/registry.json`、
-其他部门与其他员工的目录。另外 `--unshare-pid` 使实例内 `ps` 看不到宿主进程，
-顺带堵住了 `authelia crypto hash --password` 在命令行上短暂暴露密码的问题。
+其他部门与其他员工的目录、`/var/run/docker.sock`。
 
-共享 `profiles/` 挂成**只读**：此前它对所有实例可写，任何员工都能改写
+档位之间的差别只在**文件之外**的维度，`preflight-sandbox.sh` 会如实标注：
+
+| | container | bwrap | uid |
+|---|---|---|---|
+| 独立 pid ns（`ps` 看不到宿主进程） | ✔ | ✔ | ✘ |
+| 独立 net ns（连不到别人的实例） | ✔ | 需 `DSH_NETNS=1` | ✘ |
+| 资源限额 | ✔ | ✘ | ✘ |
+
+共享 `profiles/` 一律挂成**只读**：此前它对所有实例可写，任何员工都能改写
 `clamped-picker/index.mjs` 影响全体。
 
+#### container 档：宿主路径换算
+
+容器里的 docker 有两种形态，`-v` 左边的写法完全不同：
+
+- **sibling（挂宿主 socket，最常见）**：起出来的是宿主的兄弟容器，`-v` 左边必须写
+  **宿主上的绝对路径**。写成容器内路径会挂到空目录——容器能起来但挂载是错的。
+- **DinD（容器内自己的 dockerd）**：路径就是容器内的路径。
+
+后端会 `docker inspect` 自省本容器的 Mounts 建出映射表，再**真起一个探针容器验一次**。
+验不过就 probe 失败、拒绝启动实例。自省不出来时用环境变量显式指定：
+
 ```bash
-/home/ubuntu/scripts/install-bubblewrap.sh    # 无 root 安装（解包 deb）
-/home/ubuntu/dsh-runtime/dsh-sandbox.sh --check
-/home/ubuntu/scripts/preflight-sandbox.sh     # 逐项实测验收
+export DSH_HOST_ROOT=/srv/dsh     # $DSH_ROOT 在宿主上的绝对路径
 ```
+
+其他可调项：`DSH_IMAGE`（默认 `dsh-instance:local`）、`DSH_IMAGE_BASE`、
+`DSH_CONTAINER_MEMORY` / `DSH_CONTAINER_CPUS` / `DSH_CONTAINER_PIDS`、
+`DSH_PUBLISH_ADDR`（默认 `127.0.0.1`，**不要改成 0.0.0.0**，那等于把实例直接
+暴露到局域网，绕过 SSO）。
+
+#### uid 档：它给不到什么
+
+这是最后一档，只在既没有可用 docker、也开不出命名空间时才会被选中。
+它**只有文件维度的强制点**：没有 pid ns（`ps` 能看到全机进程和别人的命令行）、
+没有 net ns（员工 A 能直连 B 的实例端口）、`/tmp` 共享。
+
+它还有一条硬前提：**机器上不能有可达的 docker socket**。有的话一句
+`docker run -v /:/host ...` 就拿到整台宿主，UID 隔离完全作废——所以 probe 检测到
+socket 会直接拒绝选用自己，让位给本来就更强的 container 档。
+
+主管的部门级权限在这一档靠 POSIX ACL（`setfacl`）实现：部门目录里躺着各员工
+自己的目录，chown 过来会抢掉他们的属主，而 DAC 的三段位也表达不了「主管看整个
+部门、员工只看自己」。文件系统不支持 ACL 时这一项**给不了**，启动日志会告警。
 
 ### 降级运行（DSH_ALLOW_UNCONFINED=1）意味着什么
 
-沙箱起不来时可以用 `DSH_ALLOW_UNCONFINED=1` 让实例照常启动，但要清楚代价：
+一档都挑不出来时可以用 `DSH_ALLOW_UNCONFINED=1` 让实例照常启动，但要清楚代价：
 **这时没有任何文件系统隔离**，每个员工的 dsh 都能读写整台服务器的文件，
-包括其他部门的文件、`initial-credentials.txt` 里的全员明文初始密码、TLS 私钥。
+包括其他部门的文件、`initial-credentials.txt` 里的全员明文初始密码、TLS 私钥；
+机器上若有 docker socket，它还能一句话逃到宿主 root。
 FileBrowser 的 scope 与选择器钳制在这种模式下都拦不住 dsh 的 bash 工具。
 
 也就是说：功能全通 ≠ 隔离生效。判断标准只有一条——
@@ -235,14 +289,13 @@ FileBrowser 的 scope 与选择器钳制在这种模式下都拦不住 dsh 的 b
 scripts/preflight-sandbox.sh      # 第 1 节全绿才算隔离真的在起作用
 ```
 
-降级只应作为临时状态，尽快按上面的排障条目放行 userns 后重启全栈。
+降级只应作为临时状态。先跑 `dsh-sandbox.sh --report`，按报告里点名的那一条补前提。
 
-**fail-closed**：沙箱不可用时 `start-all.sh` 不启动任何实例、管理后台拒绝建号。
-排障可用 `DSH_ALLOW_UNCONFINED=1` 显式放行，会打出醒目告警。
+**fail-closed**：挑不出后端时 `start-all.sh` 不启动任何实例、管理后台拒绝建号。
 
 #### 排障：`bwrap: setting up uid map: Permission denied`
 
-最常见的一种失败。**本部署的服务器已实测为这种情况**
+bwrap 档最常见的一种失败。**本部署的服务器已实测为这种情况**
 （`kernel.apparmor_restrict_unprivileged_userns = 1`），本项目的 CI 在
 GitHub 的 ubuntu-24.04 runner 上也撞到过同一堵墙。原因是 Ubuntu 24.04 起
 AppArmor 默认拦截非特权 user namespace。
@@ -260,11 +313,9 @@ sudo scripts/apparmor-allow-userns.sh --sysctl  # 备选：全局关掉该限制
 | AppArmor profile（默认） | 只有 bwrap 这一个可执行文件获得 userns 权限 | 首选 |
 | 全局 sysctl | 整机所有程序都不再受该限制 | 没有 apparmor_parser，或 profile 方式失败时 |
 
-这是**宿主机的内核设置**：如果服务跑在容器里而你拿不到宿主 root，两条路
-都走不通。那种情况下的替代方案是给每个员工建独立的 OS 账号，靠文件属主
-加 700 权限做隔离（同样要 root，但只需一次性配置）。
-
-`dsh-sandbox.sh --check` 会自动判别是这条还是别的原因，并打出对应命令。
+这是**宿主机的内核设置**：服务跑在容器里而你拿不到宿主 root 的话，这两条路都
+走不通——这正是本项目改成多档自适应的原因。那种环境下 `--report` 会直接告诉你
+该走 container 档还是 uid 档，不必再跟这个开关较劲。
 
 ### 第二层（UX）：目录选择器钳制
 

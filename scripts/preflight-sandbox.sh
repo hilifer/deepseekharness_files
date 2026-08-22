@@ -16,9 +16,15 @@ ok()   { printf '  ✅ %-46s %s\n' "$1" "${2:-}"; PASS=$((PASS+1)); }
 bad()  { printf '  ❌ %-46s %s\n' "$1" "${2:-}"; FAIL=$((FAIL+1)); }
 info() { printf '  ·  %-46s %s\n' "$1" "${2:-}"; }
 
-echo "=== 0. 沙箱可用性 ==="
-if OUT=$("$SANDBOX" --check 2>&1 | tail -1); then ok "bubblewrap 可用" "$OUT"
-else bad "bubblewrap 不可用" "$OUT"; echo; echo "先跑 scripts/install-bubblewrap.sh"; exit 1; fi
+echo "=== 0. 隔离后端 ==="
+if OUT=$("$SANDBOX" --check 2>&1 | tail -1); then
+  BACKEND=$("$SANDBOX" --backend 2>/dev/null || echo unknown)
+  ok "隔离后端可用" "$OUT"
+  [ "$BACKEND" = "none" ] && bad "当前是【无隔离】模式" "DSH_ALLOW_UNCONFINED=1，下面的断言基本都会红"
+else
+  bad "挑不出隔离后端" "$OUT"
+  echo; echo "逐项原因与处理建议: $SANDBOX --report"; exit 1
+fi
 
 # ---- 选一个受测用户 ----
 USERNAME="${1:-}"
@@ -72,6 +78,10 @@ echo "OTHERHOME=$(ls "$P_ROOT/dsh-users" 2>/dev/null | grep -v "^$P_USER\$" | wc
 echo "DEPTS=$(ls "$P_ROOT/dsh-files/departments" 2>/dev/null | wc -l)"
 echo "OWNRW=$(touch "$P_WS/.preflight-rw" 2>/dev/null && rm -f "$P_WS/.preflight-rw" && echo OK || echo NO)"
 echo "PROCS=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l)"
+# docker socket 是最致命的一条：够得到就能 `docker run -v /:/host` 拿到整台宿主，
+# 前面所有的文件隔离一并作废。三个常见位置都要试。
+echo "DOCKSOCK=$( { [ -S /var/run/docker.sock ] || [ -S /run/docker.sock ] \
+                    || [ -n "${DOCKER_HOST:-}" ]; } && echo REACHABLE || echo SEALED)"
 code() { curl -s --max-time 3 -o /dev/null -w '%{http_code}' "$@" 2>/dev/null; }
 echo "FBAPI=$(code -H 'X-Forwarded-User: admin' http://127.0.0.1:18080/files/api/users)"
 echo "ADMAPI=$(code -H 'Remote-User: admin' http://127.0.0.1:19200/admin/api/users)"
@@ -118,21 +128,41 @@ for pair in "CREDS:全员明文初始密码 initial-credentials.txt" \
 done
 [ "$(g REGISTRY)" = "SEALED" ] && ok "员工登记表 registry.json" || bad "员工登记表 registry.json" "可读！"
 [ "$(g OTHERHOME)" = "0" ] && ok "其他用户的 DSH_HOME" "0 个可见" || bad "其他用户的 DSH_HOME" "$(g OTHERHOME) 个可见"
-[ "$(g DEPTS)" = "1" ] && ok "可见部门数" "仅 1 个（自己的）" || bad "可见部门数" "$(g DEPTS) 个可见"
+# 命名空间档下能看到 1 个（自己的部门，因为它是挂载点）；
+# uid 档下 departments 只给了 x 位不给 r 位，ls 直接失败，看到 0 个——更严。
+# 两种都算通过，超过 1 个才是漏。
+D=$(g DEPTS)
+[ "${D:-99}" -le 1 ] && ok "可见部门数" "$D 个（仅自己的，或连列都列不出）" \
+                     || bad "可见部门数" "$D 个可见"
 
 echo
 echo "=== 2. 自身工作区应当可读写 ==="
 [ "$(g OWNRW)" = "OK" ] && ok "自己的工作区可写" || bad "自己的工作区不可写" "实例会无法工作"
 
 echo
-echo "=== 3. 进程隔离 ==="
-P=$(g PROCS)
-[ "${P:-999}" -lt 20 ] && ok "PID 命名空间隔离" "仅 $P 个进程可见（ps 看不到宿主进程）" \
-                       || bad "PID 命名空间未隔离" "$P 个进程可见"
+echo "=== 3. 逃逸面 ==="
+[ "$(g DOCKSOCK)" = "SEALED" ] && ok "docker socket 不可达" "实例内无法起兄弟容器" \
+                               || bad "docker socket 可达" "一句 docker run -v /:/host 即可拿到整台宿主！"
 
 echo
-echo "=== 4. 网络面 ==="
-if [ "${DSH_NETNS:-0}" = "1" ]; then
+echo "=== 4. 进程隔离 ==="
+P=$(g PROCS)
+if [ "$BACKEND" = "uid" ]; then
+  # uid 档只有文件维度的强制点，本来就没有 pid ns。如实标注，不伪装成通过。
+  info "PID 命名空间" "$P 个进程可见 —— uid 后端【不提供】进程隔离（见 backends/uid.sh 文件头）"
+else
+  [ "${P:-999}" -lt 20 ] && ok "PID 命名空间隔离" "仅 $P 个进程可见（ps 看不到宿主进程）" \
+                         || bad "PID 命名空间未隔离" "$P 个进程可见"
+fi
+
+echo
+echo "=== 5. 网络面 ==="
+if [ "$BACKEND" = "container" ]; then
+  info "网络隔离" "容器后端天然每实例独立 netns，端口只发布到宿主回环"
+  LEFTOVER=$(ss -ltn 2>/dev/null | grep -cE '0\.0\.0\.0:(3080|131[0-9][0-9])' || true)
+  [ "${LEFTOVER:-0}" = "0" ] && ok "dsh 端口未暴露到 0.0.0.0" \
+                             || bad "有 $LEFTOVER 个 dsh 端口监听在 0.0.0.0" "局域网可直连实例"
+elif [ "${DSH_NETNS:-0}" = "1" ]; then
   info "网络隔离模式" "已启用（每实例独立 netns，入站走 unix socket）"
   if command -v pasta >/dev/null 2>&1 && command -v socat >/dev/null 2>&1; then
     ok "pasta 与 socat 就位"
@@ -164,8 +194,8 @@ PD=$(g PEERDSH)
 case "$PD" in
   none) info "其他员工的 dsh 实例" "（没有第二个实例，跳过）" ;;
   000)  ok "其他员工的 dsh 实例" "不可达" ;;
-  *)    bad "其他员工的 dsh 实例" "HTTP $PD 可达 —— 已知残留：可驱动他人的 agent 读写其工作区。
-       完整修复需要给每个实例独立网络命名空间（pasta/slirp4netns），见 OPS.md「残留风险」" ;;
+  *)    bad "其他员工的 dsh 实例" "HTTP $PD 可达 —— 可驱动他人的 agent 读写其工作区。
+       修复：换 container 后端（天然独立 netns），或在 bwrap 后端上开 DSH_NETNS=1" ;;
 esac
 
 echo
