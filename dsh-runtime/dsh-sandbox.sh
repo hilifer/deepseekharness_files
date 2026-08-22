@@ -271,6 +271,14 @@ args+=(--setenv HOME "$DSH_HOME_DIR")
 args+=(--setenv DSH_HOME "$DSH_HOME_DIR")
 args+=(--setenv DSH_ALLOWED_ROOT "$WORKSPACE")     # 第二层：选择器 UX 钳制（主工作区）
 args+=(--setenv DSH_ALLOWED_ROOTS "$allowed_roots") # 含额外空间的完整允许列表，每行一条
+
+# 文件上传插件（dsh-file-uploads 之类）的落盘目录。
+# 插件默认存到 $DSH_HOME/uploads —— 那个目录不在 FileBrowser 的 source 里，
+# 员工在 dsh 里传的文件在文件服务器上根本看不见，与「两边看到同一个空间」
+# 相矛盾。所以默认改到本人工作区之下，传完立刻能在 /files/ 里看到。
+# 沙箱用了 --clearenv，不显式 setenv 的话插件读不到这个值。
+# 未装上传插件时这个变量无人使用，留着无副作用。
+args+=(--setenv DSH_UPLOAD_DIR "${DSH_UPLOAD_DIR:-$WORKSPACE/uploads}")
 args+=(--setenv DSH_NODE_ROOT "$NODE_ROOT")     # 钳制插件据此定位 dsh 的内部包
 args+=(--setenv USER "$USERNAME")
 args+=(--setenv LANG "${LANG:-C.UTF-8}")

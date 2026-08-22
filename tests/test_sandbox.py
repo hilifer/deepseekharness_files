@@ -388,6 +388,7 @@ class ExtraMountsTest(unittest.TestCase):
         'echo "RODIR_R=$(r $P_RO)"; echo "RODIR_W=$(w $P_RO)"\n'
         'echo "SECRET=$(r $P_SECRET)"\n'
         'echo "ROOTS=$(echo "$DSH_ALLOWED_ROOTS" | tr "\\n" "|")"\n'
+        'echo "UPLOAD=$DSH_UPLOAD_DIR"\n'
     )
 
     @classmethod
@@ -454,6 +455,10 @@ class ExtraMountsTest(unittest.TestCase):
     def test_unlisted_dir_still_sealed(self):
         """没列进挂载表的目录，即便是同一个父目录下的兄弟，也必须看不到。"""
         self.assertEqual(self.out["SECRET"], "SEALED")
+
+    def test_upload_dir_defaults_inside_workspace(self):
+        """上传插件的落盘目录必须在工作区内，否则传的文件在文件服务器里看不见。"""
+        self.assertEqual(self.out["UPLOAD"], str(self.root / "files/own/uploads"))
 
     def test_allowed_roots_passed_to_picker(self):
         """选择器插件要拿到完整的允许根列表，否则能读却选不到。"""

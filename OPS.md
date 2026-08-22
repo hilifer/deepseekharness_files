@@ -166,6 +166,30 @@ v1.5.2 版本无内置回收站。主管删除部门文件为**永久删除**（
 「不一致」说明有人绕过后台直接改过 FileBrowser 权限，用「编辑」保存一次即可纠正，
 命令行等价物是 `python3 admin/cli.py update <user> --role <当前角色>`。
 
+## 文件上传
+
+dsh 核心**没有**内置的任意文件上传，需要装插件，例如
+`github:l541402398/dsh-file-uploads`（要求 dsh >= 0.1.0-rc.6、Node 22+、
+仅 Web profile；单文件 100 MiB、目录合计 1 GiB）。装之前先确认版本：
+
+```bash
+dsh --version
+```
+
+本部署已为此做了两处配合，装上插件即可用：
+
+- `DSH_UPLOAD_DIR` 由 `dsh-sandbox.sh` 设为 **本人工作区下的 `uploads/`**。
+  插件默认落在 `$DSH_HOME/uploads`，那不在 FileBrowser 的 source 里，
+  员工在 dsh 里传的文件在 `/files/` 上看不见，与「两边看到同一个空间」相矛盾。
+  沙箱用了 `--clearenv`，这个变量必须显式 setenv 才能传进去。
+- nginx `client_max_body_size` 提到 `256m`，给 100 MiB 单文件加 multipart
+  开销留出余量，否则接近上限的文件会被 413 拦掉。
+
+插件自身的安全模型只有 loopback/trusted-host 与 Origin 校验，作者也建议放在
+带认证的反代后面——本部署的 Authelia 已经满足这一条。
+
+未装插件时 `DSH_UPLOAD_DIR` 无人读取，留着无副作用。
+
 ## 工作区隔离
 
 分两层，内核层是真边界，UX 层只管好看。
