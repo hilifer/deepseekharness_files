@@ -242,9 +242,12 @@ class NetnsIsolationTest(unittest.TestCase):
         for sub in ("A", "B"):
             (root / f"dsh-users/{sub}").mkdir(parents=True)
             (root / f"ws/{sub}").mkdir(parents=True)
-        for name in ("dsh-sandbox.sh", "dsh-netns-entry.sh"):
+        for name in ("dsh-sandbox.sh", "dsh-netns-entry.sh", "dsh-container-entry.sh"):
             shutil.copy(REPO / "dsh-runtime" / name, root / "dsh-runtime" / name)
             (root / "dsh-runtime" / name).chmod(0o755)
+        # 隔离层是「调度器 + backends/ 下的后端」，只拷调度器的话四档全报
+        # NO_SCRIPT，实例一个也起不来。
+        shutil.copytree(REPO / "dsh-runtime" / "backends", root / "dsh-runtime" / "backends")
         shutil.copy("/bin/bash", root / "node/bin/node")
         # 冒充 dsh：在本 netns 的 --port 上起一个 HTTP 服务
         fake = root / "node/bin/dsh"

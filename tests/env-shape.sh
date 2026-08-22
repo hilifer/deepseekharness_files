@@ -49,7 +49,7 @@ say "搭仿真部署树 -> $R"
 say "环境能力报告"
 bash "$SANDBOX" --report 2>&1 | sed 's/^/  /'
 
-BACKEND=$(bash "$SANDBOX" --backend 2>/dev/null || echo "")
+BACKEND=$(bash "$SANDBOX" --backend 2>/dev/null) || BACKEND=""
 say "调度器选中: ${BACKEND:-（无）}"
 
 if [ "$EXPECT" = "refuse" ]; then

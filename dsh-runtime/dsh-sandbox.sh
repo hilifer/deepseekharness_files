@@ -38,6 +38,16 @@ AUTO_ORDER="container bwrap uid none"
 
 log() { echo "[isolate] $*" >&2; }
 
+# 隔离层是「调度器 + backends/ 下的后端」，不是单个脚本。只拷走 dsh-sandbox.sh
+# 的话下面每一档都会报 NO_SCRIPT，看起来像「这台机器什么都不支持」——
+# 那是误导，这里先把真正的原因说清楚。
+if [ ! -d "$BACKEND_DIR" ]; then
+  log "错误: 找不到后端目录 $BACKEND_DIR"
+  log "  dsh-sandbox.sh 只是调度器，各档隔离的实现在它同级的 backends/ 里，"
+  log "  部署时两者必须一起拷贝。"
+  exit 1
+fi
+
 backend_script() { echo "$BACKEND_DIR/$1.sh"; }
 
 probe_backend() { # $1=后端名；stdout=该后端的自检输出
@@ -121,8 +131,10 @@ case "${1:-}" in
     env_report; exit $?
     ;;
   --backend)
+    # 挑不出来时【什么都不打印】，只用退出码表达。调用方常写成
+    # BACKEND=$(... || echo "")，打点什么出来都会被当成档位名。
     if select_backend; then echo "$SELECTED"; exit 0; fi
-    echo none-unavailable; exit 1
+    exit 1
     ;;
   --check)
     if select_backend; then
