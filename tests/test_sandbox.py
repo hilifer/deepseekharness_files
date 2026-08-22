@@ -472,6 +472,67 @@ class ExtraMountsTest(unittest.TestCase):
 class SandboxFailClosedTest(unittest.TestCase):
     """沙箱不可用时必须拒绝启动，而不是退回无隔离运行。"""
 
+    @staticmethod
+    def _fake_root(tmp: Path) -> Path:
+        (tmp / "node/bin").mkdir(parents=True)
+        (tmp / "ws").mkdir()
+        (tmp / "home").mkdir()
+        return tmp
+
+    def test_broken_bwrap_can_reach_the_override(self):
+        """bwrap 装着但跑不起来时，降级开关必须够得到。
+
+        早先 find_bwrap 只判可执行，「存在但坏」会走进沙箱分支反复失败、
+        实例直接死掉，DSH_ALLOW_UNCONFINED 压根到不了——现场只能把 bwrap
+        改名骗过检测才能启动。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_root(Path(tmp))
+            broken = root / "brokenbw"
+            broken.write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
+            broken.chmod(0o755)
+            env = {**os.environ, "BWRAP_BIN": str(broken), "DSH_ROOT": str(root),
+                   "DSH_NODE_ROOT": str(root / "node")}
+
+            # 不放行：拒绝，且要说清是「跑不起来」而不是「没找到」
+            res = subprocess.run(
+                [str(SANDBOX), "u", "13101", str(root / "home"), str(root / "ws")],
+                capture_output=True, text=True, timeout=60, env=env)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("跑不起来", res.stderr)
+
+            # 放行：应真的降级启动
+            env2 = {**env, "DSH_ALLOW_UNCONFINED": "1",
+                    "DSH_NODE_BIN": "/bin/echo", "DSH_BIN": "DSH"}
+            res2 = subprocess.run(
+                [str(SANDBOX), "u", "13101", str(root / "home"), str(root / "ws")],
+                capture_output=True, text=True, timeout=60, env=env2)
+            self.assertEqual(res2.returncode, 0, res2.stderr[-500:])
+            self.assertIn("无隔离启动", res2.stderr)
+
+    def test_downgrade_passes_every_trusted_host(self):
+        """降级路径也要传全部 trusted-host。
+
+        只传第一个（公网 IP）的话，云 NAT 场景下本机与局域网访问会被 dsh 的
+        Host 校验一律拒绝，等于谁都用不了。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fake_root(Path(tmp))
+            broken = root / "brokenbw"
+            broken.write_text("#!/bin/bash\nexit 1\n", encoding="utf-8")
+            broken.chmod(0o755)
+            res = subprocess.run(
+                [str(SANDBOX), "u", "13101", str(root / "home"), str(root / "ws")],
+                capture_output=True, text=True, timeout=60,
+                env={**os.environ, "BWRAP_BIN": str(broken), "DSH_ROOT": str(root),
+                     "DSH_NODE_ROOT": str(root / "node"),
+                     "DSH_ALLOW_UNCONFINED": "1",
+                     "DSH_NODE_BIN": "/bin/echo", "DSH_BIN": "DSH",
+                     "DSH_TRUSTED_HOSTS": "a:1 b:2 c:3"})
+            self.assertEqual(res.stdout.count("--trusted-host"), 3, res.stdout)
+            for h in ("a:1", "b:2", "c:3"):
+                self.assertIn(h, res.stdout)
+
     def test_refuses_to_start_without_bwrap(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

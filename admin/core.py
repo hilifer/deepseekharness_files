@@ -298,7 +298,8 @@ class Config:
     fb_source_name: str = "公司文件"
     fb_proxy_header: str = "X-Forwarded-User"
     authelia_health: str = "http://127.0.0.1:19091/api/health"
-    trusted_hosts: str = "218.17.143.249:8099"
+    # 三个入口域全填：公网 IP 是云 NAT，本机与局域网访问只认后两个
+    trusted_hosts: str = "218.17.143.249:8099 192.168.1.225:8099 127.0.0.1:8099"
     # 网络隔离模式：每实例独立网络命名空间，入站走 unix socket，
     # 宿主回环上不再留 dsh 端口，员工之间无法互连实例。详见 dsh-sandbox.sh。
     netns: bool = False
@@ -348,7 +349,9 @@ class Config:
             fb_base=os.environ.get("FB_BASE", "http://127.0.0.1:18080/files"),
             fb_proxy_header=(os.environ.get("FB_PROXY_HEADER")
                              or read_fb_proxy_header(root)),
-            trusted_hosts=os.environ.get("DSH_TRUSTED_HOSTS", "218.17.143.249:8099"),
+            trusted_hosts=os.environ.get(
+                "DSH_TRUSTED_HOSTS",
+                "218.17.143.249:8099 192.168.1.225:8099 127.0.0.1:8099"),
             netns=os.environ.get("DSH_NETNS", "0") == "1",
         )
 
@@ -377,13 +380,53 @@ class Engine:
             except Exception:
                 ports = {}
             for username, port in ports.items():
-                data["users"][username] = {
+                rec = {
                     "username": username, "name": username, "department": "未分配",
-                    "role": ROLE_STAFF, "port": int(port),
-                    "workspace": "", "migrated_from_ports_json": True,
+                    "role": ROLE_STAFF, "port": int(port), "workspace": "", "mounts": [],
+                    "migrated_from_ports_json": True,
                     "created_at": _now(), "updated_at": _now(),
                 }
+                rec.update(self._recover_from_legacy_workspace(username))
+                data["users"][username] = rec
         return data
+
+    def _recover_from_legacy_workspace(self, username: str) -> dict:
+        """迁移老用户时，从其 storages/workspace.json 恢复工作区与部门/姓名。
+
+        ports.json 只有 username -> port，没有工作区路径。早先迁移直接留空，
+        结果 start-all.sh 见空即跳过，所有老员工的实例全部拒启——运维只能
+        手工把整张登记表补出来。老实例自己的 workspace.json 里恰好有这个路径，
+        这是迁移时唯一可靠的来源。
+
+        注意这和「运行时从用户可写文件推导钳制根」是两回事：那个是每次启动
+        都信任被约束方写的数据，这个是一次性把历史数据搬进管理侧登记表，
+        搬完就以登记表为准。恢复不出来也不猜，留空由管理员在后台补。
+        """
+        ws_file = self.cfg.users_root / username / "storages" / "workspace.json"
+        try:
+            doc = json.loads(ws_file.read_text(encoding="utf-8"))
+            ids = doc["global"]["workspaceIds"]
+            entry = doc["tables"]["workspaces"][ids[0]]
+            path = Path(entry["path"])
+        except Exception:
+            return {}
+        if not path.is_absolute():
+            return {}
+
+        out: dict[str, Any] = {"workspace": str(path)}
+        if entry.get("title"):
+            out["name"] = entry["title"]
+        # 路径形如 .../departments/<部门>/<姓名> 时，把部门和姓名也一并还原
+        try:
+            rel = path.relative_to(self.cfg.departments).parts
+        except ValueError:
+            return out
+        if len(rel) == 2:
+            out["department"], out["name"] = rel[0], rel[1]
+        elif len(rel) == 1:
+            # 工作区就是部门目录 -> 这是个主管
+            out["department"], out["role"] = rel[0], ROLE_LEAD
+        return out
 
     def save_registry(self, data: dict) -> None:
         self.cfg.users_root.mkdir(parents=True, exist_ok=True)

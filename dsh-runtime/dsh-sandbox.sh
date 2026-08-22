@@ -37,11 +37,10 @@ NODE_BIN="${DSH_NODE_BIN:-$NODE_ROOT/bin/node}"
 DSH_BIN="${DSH_BIN:-$NODE_ROOT/bin/dsh}"
 SHARED_PROFILES="${DSH_SHARED_PROFILES:-$DSH_ROOT/.local/share/dsh/profiles}"
 
-# dsh 的 --trusted-host。OPS.md 记录本机/局域网/公网三个入口域，
-# 但当前只信任公网域，从 127.0.0.1:8099 访问可能被 dsh 拒绝。
-# 确认 dsh 接受重复的 --trusted-host 后，把三个域都填进来即可修复：
-#   DSH_TRUSTED_HOSTS="218.17.143.249:8099 192.168.1.225:8099 127.0.0.1:8099"
-DSH_TRUSTED_HOSTS="${DSH_TRUSTED_HOSTS:-218.17.143.249:8099}"
+# dsh 的 --trusted-host，三个入口域全填（见 OPS.md）。
+# 公网 IP 是云 NAT，不绑在本机网卡上，只填它的话本机与局域网访问会被
+# dsh 的 Host 校验一律拒绝。现场实测已确认 dsh 接受重复的 --trusted-host。
+DSH_TRUSTED_HOSTS="${DSH_TRUSTED_HOSTS:-218.17.143.249:8099 192.168.1.225:8099 127.0.0.1:8099}"
 
 # 允许透传进沙箱的环境变量名（dsh 的模型 API Key 之类放这里）
 DSH_SANDBOX_PASSENV="${DSH_SANDBOX_PASSENV:-}"
@@ -68,7 +67,30 @@ log() { echo "[sandbox] $*" >&2; }
 die() { echo "[sandbox] 错误: $*" >&2; exit 1; }
 
 # ---------- 定位 bwrap ----------
+# 只找到文件是不够的：内核禁用非特权 user namespace 时 bwrap 装着也跑不起来。
+# 早先这里只判可执行，于是「存在但坏」会走进沙箱分支，每次启动都失败、实例
+# 直接死掉，而 DSH_ALLOW_UNCONFINED 那条降级路径压根够不到——运维只能把
+# bwrap 改名骗过检测。现在把「能不能真跑」并进查找条件，两种情况一视同仁。
+bwrap_usable() {
+  [ -x "$1" ] && "$1" --ro-bind / / --unshare-all --share-net true >/dev/null 2>&1
+}
+
 find_bwrap() {
+  if [ -n "${BWRAP_BIN:-}" ]; then
+    bwrap_usable "$BWRAP_BIN" && { echo "$BWRAP_BIN"; return 0; }
+    return 1
+  fi
+  local c
+  for c in "$(command -v bwrap 2>/dev/null || true)" \
+           "$DSH_ROOT/bwrap/usr/bin/bwrap" \
+           /usr/bin/bwrap /bin/bwrap; do
+    [ -n "$c" ] && bwrap_usable "$c" && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
+# 仅用于报错时区分「没装」和「装了但跑不起来」
+find_bwrap_binary() {
   if [ -n "${BWRAP_BIN:-}" ] && [ -x "${BWRAP_BIN:-}" ]; then echo "$BWRAP_BIN"; return 0; fi
   local c
   for c in "$(command -v bwrap 2>/dev/null || true)" \
@@ -82,11 +104,9 @@ find_bwrap() {
 # ---------- 自检：bwrap 存在且 user namespace 真的能用 ----------
 sandbox_check() {
   local bw
-  bw=$(find_bwrap) || { echo "MISSING"; return 1; }
-  if "$bw" --ro-bind / / --unshare-all --share-net true >/dev/null 2>&1; then
-    echo "OK $bw"; return 0
-  fi
-  echo "BROKEN $bw"; return 1
+  if bw=$(find_bwrap); then echo "OK $bw"; return 0; fi
+  if bw=$(find_bwrap_binary); then echo "BROKEN $bw"; return 1; fi
+  echo "MISSING"; return 1
 }
 
 netns_check() {
@@ -150,17 +170,33 @@ WORKSPACE="${4:?缺少 workspace}"
 
 # ---------- 取 bwrap，失败则 fail-closed ----------
 if ! BWRAP=$(find_bwrap); then
-  if [ "${DSH_ALLOW_UNCONFINED:-0}" = "1" ]; then
-    log "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-    log "!! 警告: 未找到 bwrap，DSH_ALLOW_UNCONFINED=1 强制无隔离启动 !!"
-    log "!! $USERNAME 的 dsh 可读写整台服务器的所有文件            !!"
-    log "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-    export DSH_HOME="$DSH_HOME_DIR" DSH_ALLOWED_ROOT="$WORKSPACE"
-    exec "$NODE_BIN" "$DSH_BIN" web --port "$PORT" --trusted-host "${DSH_TRUSTED_HOSTS%% *}"
+  if bwrap_path=$(find_bwrap_binary); then
+    why="bwrap 在 $bwrap_path 但跑不起来（多半是内核禁用了非特权 user namespace）"
+    fix="放行: sudo $DSH_ROOT/scripts/apparmor-allow-userns.sh"
+  else
+    why="未找到 bwrap"
+    fix="安装: $DSH_ROOT/scripts/install-bubblewrap.sh"
   fi
-  die "未找到 bwrap，拒绝以无隔离方式启动 $USERNAME 的实例。
-       安装: scripts/install-bubblewrap.sh
-       排障临时放行(危险): DSH_ALLOW_UNCONFINED=1"
+
+  if [ "${DSH_ALLOW_UNCONFINED:-0}" = "1" ]; then
+    log "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    log "!! 警告: $why"
+    log "!! DSH_ALLOW_UNCONFINED=1 -> 无隔离启动 $USERNAME 的实例"
+    log "!! 该实例可读写整台服务器的所有文件，包括其他部门的文件、"
+    log "!! 明文初始密码和 TLS 私钥。仅供排障，不要长期这样跑。"
+    log "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    # 降级路径同样要传【全部】 trusted-host：只传第一个（公网 IP）的话，
+    # 云 NAT 场景下本机与局域网访问会被 dsh 的 Host 校验一律拒绝。
+    dg_args=()
+    for h in $DSH_TRUSTED_HOSTS; do dg_args+=(--trusted-host "$h"); done
+    export DSH_HOME="$DSH_HOME_DIR" DSH_ALLOWED_ROOT="$WORKSPACE"
+    export DSH_ALLOWED_ROOTS="$WORKSPACE" DSH_NODE_ROOT="$NODE_ROOT"
+    export DSH_UPLOAD_DIR="${DSH_UPLOAD_DIR:-$WORKSPACE/uploads}"
+    exec "$NODE_BIN" "$DSH_BIN" web --port "$PORT" "${dg_args[@]}"
+  fi
+  die "$why，拒绝以无隔离方式启动 $USERNAME 的实例。
+       $fix
+       排障临时放行(危险，全公司文件对该实例敞开): DSH_ALLOW_UNCONFINED=1"
 fi
 
 [[ "$PORT" =~ ^[0-9]{2,5}$ ]] || die "端口不合法: $PORT"

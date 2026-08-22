@@ -222,6 +222,21 @@ dsh --version
 /home/ubuntu/scripts/preflight-sandbox.sh     # 逐项实测验收
 ```
 
+### 降级运行（DSH_ALLOW_UNCONFINED=1）意味着什么
+
+沙箱起不来时可以用 `DSH_ALLOW_UNCONFINED=1` 让实例照常启动，但要清楚代价：
+**这时没有任何文件系统隔离**，每个员工的 dsh 都能读写整台服务器的文件，
+包括其他部门的文件、`initial-credentials.txt` 里的全员明文初始密码、TLS 私钥。
+FileBrowser 的 scope 与选择器钳制在这种模式下都拦不住 dsh 的 bash 工具。
+
+也就是说：功能全通 ≠ 隔离生效。判断标准只有一条——
+
+```bash
+scripts/preflight-sandbox.sh      # 第 1 节全绿才算隔离真的在起作用
+```
+
+降级只应作为临时状态，尽快按上面的排障条目放行 userns 后重启全栈。
+
 **fail-closed**：沙箱不可用时 `start-all.sh` 不启动任何实例、管理后台拒绝建号。
 排障可用 `DSH_ALLOW_UNCONFINED=1` 显式放行，会打出醒目告警。
 

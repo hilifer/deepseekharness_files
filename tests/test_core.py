@@ -567,12 +567,68 @@ class TestDelete(TempCase):
 
 
 class TestRegistryAndStatus(TempCase):
+    def _seed_legacy(self, username: str, path: Path, title: str = ""):
+        """造一个老实例的 storages/workspace.json（迁移时的唯一数据来源）。"""
+        d = self.cfg.users_root / username / "storages"
+        d.mkdir(parents=True, exist_ok=True)
+        wsid = "abc123"
+        (d / "workspace.json").write_text(json.dumps({
+            "unit": {"name": "workspace", "version": 2},
+            "global": {"initialized": True, "workspaceIds": [wsid]},
+            "tables": {"workspaces": {wsid: {"path": str(path), "title": title}}},
+        }, ensure_ascii=False), encoding="utf-8")
+
     def test_migrates_legacy_ports_json(self):
         self.cfg.users_root.mkdir(parents=True, exist_ok=True)
         self.cfg.legacy_ports.write_text(json.dumps({"lisi": 13102}), encoding="utf-8")
         reg = self.engine.load_registry()
         self.assertEqual(reg["users"]["lisi"]["port"], 13102)
         self.assertTrue(reg["users"]["lisi"]["migrated_from_ports_json"])
+
+    def test_migration_recovers_workspace_and_identity(self):
+        """迁移必须把工作区一并恢复。
+
+        早先留空，start-all.sh 见空即跳过，所有老员工实例全部拒启，
+        运维只能手工把整张登记表补出来——现场就是这么卡住的。
+        """
+        self.cfg.users_root.mkdir(parents=True, exist_ok=True)
+        self.cfg.legacy_ports.write_text(json.dumps({"zhangsan": 13101}), encoding="utf-8")
+        personal = self.cfg.departments / "研发部" / "张三"
+        personal.mkdir(parents=True)
+        self._seed_legacy("zhangsan", personal, title="张三")
+
+        rec = self.engine.load_registry()["users"]["zhangsan"]
+        self.assertEqual(rec["workspace"], str(personal))
+        self.assertEqual(rec["department"], "研发部")
+        self.assertEqual(rec["name"], "张三")
+        self.assertEqual(rec["role"], "员工")
+
+    def test_migration_infers_lead_from_department_level_workspace(self):
+        """工作区就是部门目录 -> 这人是主管。"""
+        self.cfg.users_root.mkdir(parents=True, exist_ok=True)
+        self.cfg.legacy_ports.write_text(json.dumps({"lisi": 13102}), encoding="utf-8")
+        dept = self.cfg.departments / "研发部"
+        dept.mkdir(parents=True)
+        self._seed_legacy("lisi", dept)
+
+        rec = self.engine.load_registry()["users"]["lisi"]
+        self.assertEqual(rec["workspace"], str(dept))
+        self.assertEqual(rec["department"], "研发部")
+        self.assertEqual(rec["role"], "主管")
+
+    def test_migration_leaves_workspace_empty_when_unrecoverable(self):
+        """恢复不出来就留空由管理员补，不猜一个错的路径。"""
+        self.cfg.users_root.mkdir(parents=True, exist_ok=True)
+        self.cfg.legacy_ports.write_text(json.dumps({"wang_er": 13103}), encoding="utf-8")
+        rec = self.engine.load_registry()["users"]["wang_er"]
+        self.assertEqual(rec["workspace"], "")
+
+    def test_trusted_hosts_include_all_three_entry_domains(self):
+        """只传公网 IP 的话，云 NAT 场景下本机与局域网访问会被 dsh 拒绝。"""
+        hosts = self.cfg.trusted_hosts.split()
+        self.assertIn("218.17.143.249:8099", hosts)
+        self.assertIn("192.168.1.225:8099", hosts)
+        self.assertIn("127.0.0.1:8099", hosts)
 
     def test_ports_json_stays_in_sync(self):
         self.engine.create_user("zhangsan", "张三", "研发部", "员工")
