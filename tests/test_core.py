@@ -627,6 +627,53 @@ class TestRegistryAndStatus(TempCase):
         rec = self.engine.load_registry()["users"]["wang_er"]
         self.assertEqual(rec["workspace"], "")
 
+
+    def test_migration_rejects_workspace_outside_departments(self):
+        """员工能写的文件不能决定他的工作区范围。
+
+        storages/workspace.json 在员工自己的 DSH_HOME 里，是被约束方能改的数据。
+        早先路径解析不出 departments/<部门>/<姓名> 结构时仍然照收，员工在 dsh 里
+        「添加工作区」指到 dsh-files 根，再赶上一次 registry.json 重建，迁移就会
+        把【全公司根目录】写成他的工作区——沙箱据此 rw 挂载、钳制根据此设定、
+        FileBrowser scope 据此推导。现场就是这么变成「工作区 = 公司文件」的。
+        """
+        self.cfg.users_root.mkdir(parents=True, exist_ok=True)
+        self.cfg.legacy_ports.write_text(json.dumps({"zhangsan": 13101}), encoding="utf-8")
+        self.cfg.files_root.mkdir(parents=True, exist_ok=True)
+        # 员工把工作区指到了全公司根
+        self._seed_legacy("zhangsan", self.cfg.files_root, title="公司文件")
+
+        rec = self.engine.load_registry()["users"]["zhangsan"]
+        self.assertEqual(rec["workspace"], "", "公司根目录被当成了员工工作区")
+        self.assertNotEqual(rec.get("name"), "公司文件",
+                            "连显示名都不该采信未通过校验的记录")
+
+    def test_migration_rejects_workspace_outside_the_tree_entirely(self):
+        """指到部署树之外（比如 /etc）同样要整条丢弃。"""
+        self.cfg.users_root.mkdir(parents=True, exist_ok=True)
+        self.cfg.legacy_ports.write_text(json.dumps({"lisi": 13102}), encoding="utf-8")
+        self._seed_legacy("lisi", Path("/etc"))
+        self.assertEqual(self.engine.load_registry()["users"]["lisi"]["workspace"], "")
+
+    def test_migration_rejects_departments_root_itself(self):
+        """departments 本身不是任何人的空间——那是所有部门的父目录。"""
+        self.cfg.users_root.mkdir(parents=True, exist_ok=True)
+        self.cfg.legacy_ports.write_text(json.dumps({"wang_er": 13103}), encoding="utf-8")
+        self.cfg.departments.mkdir(parents=True, exist_ok=True)
+        self._seed_legacy("wang_er", self.cfg.departments)
+        self.assertEqual(self.engine.load_registry()["users"]["wang_er"]["workspace"], "")
+
+    def test_start_refuses_workspace_outside_departments(self):
+        """登记表被改坏/从旧数据恢复时，启动路径上还有最后一道闸。"""
+        self.engine.create_user("zhangsan", "张三", "研发部", "员工")
+        self.engine.set_instance("zhangsan", False)   # 先停掉，否则 dsh_start 直接返回
+        reg = self.engine.load_registry()
+        rec = reg["users"]["zhangsan"]
+        rec["workspace"] = str(self.cfg.files_root)   # 手工改成公司根
+        with self.assertRaises(ProvisionError) as cm:
+            self.engine.dsh_start("zhangsan", rec)
+        self.assertIn("不在", str(cm.exception))
+
     def test_trusted_hosts_include_all_three_entry_domains(self):
         """只传公网 IP 的话，云 NAT 场景下本机与局域网访问会被 dsh 拒绝。"""
         hosts = self.cfg.trusted_hosts.split()

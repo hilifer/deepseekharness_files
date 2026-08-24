@@ -413,19 +413,31 @@ class Engine:
         if not path.is_absolute():
             return {}
 
-        out: dict[str, Any] = {"workspace": str(path)}
-        if entry.get("title"):
-            out["name"] = entry["title"]
-        # 路径形如 .../departments/<部门>/<姓名> 时，把部门和姓名也一并还原
+        # workspace.json 在员工【自己可写】的 DSH_HOME 里，是被约束方能改的数据。
+        # 所以这里恢复出来的路径必须先证明它落在 departments/<部门>[/<姓名>] 上；
+        # 证明不了就整条丢弃，留空让管理员在后台补。
+        #
+        # 早先这里在 relative_to 抛 ValueError 时仍然 `return out`，等于把员工
+        # 写进那个文件的【任意绝对路径】当成工作区收下——员工在 dsh 里「添加工作区」
+        # 指到 dsh-files 根，再赶上一次 registry.json 重建，迁移就会把全公司根目录
+        # 写成他的工作区：沙箱据此 rw 挂载、钳制根据此设定、FileBrowser scope 据此推导。
+        # 现场就是这么变成「工作区 = 公司文件」的。
         try:
-            rel = path.relative_to(self.cfg.departments).parts
-        except ValueError:
-            return out
+            rel = path.resolve().relative_to(self.cfg.departments.resolve()).parts
+        except (ValueError, OSError):
+            return {}
+        out: dict[str, Any] = {"workspace": str(path)}
         if len(rel) == 2:
             out["department"], out["name"] = rel[0], rel[1]
         elif len(rel) == 1:
             # 工作区就是部门目录 -> 这是个主管
             out["department"], out["role"] = rel[0], ROLE_LEAD
+        else:
+            # 0 层（就是 departments 本身）或 3 层以上，都不是合法的空间形状
+            return {}
+        # title 只在路径已被证明合法之后才采信，否则等于让员工自选显示名
+        if entry.get("title"):
+            out["name"] = entry["title"]
         return out
 
     def save_registry(self, data: dict) -> None:
@@ -665,6 +677,7 @@ class Engine:
         workspace = Path(rec["workspace"])
         if not workspace.is_dir():
             raise ProvisionError(f"工作区不存在，拒绝启动实例: {workspace}")
+        self._assert_workspace_contained(username, workspace)
         dsh_home.mkdir(parents=True, exist_ok=True)
         self.run.spawn(
             [str(self.cfg.sandbox_sh), username, str(port), str(dsh_home), str(workspace)],
@@ -674,6 +687,28 @@ class Engine:
                  "DSH_NETNS": "1" if self.cfg.netns else "0",
                  "DSH_EXTRA_MOUNTS": self._encode_mounts(self.effective_mounts(rec))},
         )
+
+    def _assert_workspace_contained(self, username: str, workspace: Path) -> None:
+        """工作区必须真落在 departments 之内——启动路径上的最后一道闸。
+
+        登记表不是不可信的：它可能被手工改坏、被旧版本的迁移逻辑写脏、或从
+        备份里恢复回来。这一条不看它写了什么，只看解析符号链接之后到底指向
+        哪儿。挡不住就【不启动】，而不是带着一个指向全公司根目录的工作区把
+        实例拉起来。
+        """
+        depts = self.cfg.departments.resolve()
+        try:
+            rel = workspace.resolve().relative_to(depts).parts
+        except (ValueError, OSError):
+            raise ProvisionError(
+                f"{username} 的工作区不在 {depts} 之内，拒绝启动实例: {workspace}\n"
+                "  这通常意味着登记表被改坏或从旧数据恢复过。请在管理后台重设该员工的部门与姓名。"
+            ) from None
+        if not 1 <= len(rel) <= 2:
+            raise ProvisionError(
+                f"{username} 的工作区层级不合法（应为 departments/<部门>[/<姓名>]），"
+                f"拒绝启动实例: {workspace}"
+            )
 
     def dsh_restart(self, username: str, rec: dict) -> None:
         self.dsh_stop(rec["port"])

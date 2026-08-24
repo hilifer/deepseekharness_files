@@ -219,10 +219,38 @@ apply_rlimits() {
   fi
 }
 
+# 工作区收容校验。这一层才是真正执行挂载/授权的地方，所以它【不能】依赖
+# core.py 传来的东西是对的：登记表可能被手改、被坏掉的迁移写脏、从备份恢复。
+# 只看解析符号链接之后到底指向哪儿。
+#
+# 允许的形状只有 departments/<部门> 或 departments/<部门>/<姓名>。
+# 指向 dsh-files 根、指向 departments 本身、指向外部路径，一律拒绝启动——
+# 那些都等于把远超本人空间的范围挂进实例。
+DSH_FILES_ROOT="${DSH_FILES_ROOT:-$DSH_ROOT/dsh-files}"
+assert_workspace_contained() { # $1=workspace(已存在)
+  local ws depts rel
+  ws=$(readlink -f "$1") || die "工作区路径解析失败: $1"
+  depts=$(readlink -f "$DSH_FILES_ROOT/departments" 2>/dev/null) || {
+    log "注意: $DSH_FILES_ROOT/departments 不存在，跳过收容校验（非标准部署树）"
+    return 0
+  }
+  case "$ws" in
+    "$depts"/*) rel="${ws#"$depts"/}" ;;
+    *) die "工作区不在 $depts 之内，拒绝启动: $ws
+       指向公司根或外部路径的工作区会把远超本人空间的范围挂进实例。
+       请在管理后台重设该员工的部门与姓名。" ;;
+  esac
+  # 层级只能是 1（主管=部门目录）或 2（员工=个人目录）
+  case "$rel" in
+    */*/*) die "工作区层级过深（应为 departments/<部门>[/<姓名>]），拒绝启动: $ws" ;;
+  esac
+}
+
 # 各后端 run 之前统一做的参数校验
 validate_run_args() { # $1=port $2=dsh_home $3=workspace
   [[ "$1" =~ ^[0-9]{2,5}$ ]] || die "端口不合法: $1"
   [ -d "$2" ] || die "DSH_HOME 不存在: $2"
   [ -d "$3" ] || die "工作区不存在: $3"
   [ -d "$NODE_ROOT" ] || die "node 目录不存在: $NODE_ROOT"
+  [ "${DSH_SKIP_WORKSPACE_CHECK:-0}" = "1" ] || assert_workspace_contained "$3"
 }
