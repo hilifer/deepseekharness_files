@@ -87,6 +87,12 @@ backend_run() {
   for d in /proc /dev; do
     [ -e "$d" ] && args+=(--rwio "$d")
   done
+  # 这两个例外必须给完整读写，否则 node 起不来：
+  #   /dev/shm      共享内存要能创建文件（rwio 不给 make_reg）
+  #   /run/user/UID XDG 运行时目录，一些工具会往里写
+  # 它们都是本用户专属或全局临时区，不含员工数据。
+  [ -d /dev/shm ] && args+=(--rw /dev/shm)
+  [ -d "/run/user/$(id -u)" ] && args+=(--rw "/run/user/$(id -u)")
 
   # 程序本体与共享插件：只读，员工改不了 dsh 也改不了别人的插件
   args+=(--ro "$NODE_ROOT")
