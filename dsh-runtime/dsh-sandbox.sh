@@ -16,16 +16,21 @@
 #       容器内改不了。此前整个方案押在它上面，现场因此一天没生效过。
 #     · 容器后端需要够得到 docker 守护进程。
 #     · UID 后端需要容器内 root，且一旦有可达的 docker socket 就作废。
+#     · Landlock 只需要内核 5.13+，前三样前提一个都不要——但它比命名空间弱：
+#       越界是「拒绝访问」而非「不存在」，且没有 pid ns。
 #   所以正确的做法不是选一种，而是【探测 + 按隔离强度择优 + 探不到就拒绝启动】。
 #
 # 选择顺序（强 -> 弱），DSH_ISOLATION 可以强制指定某一档：
 #   1 container  独立容器：mount/net/pid/user ns + cgroup 限额，全套
 #   2 bwrap      挂载命名空间：文件系统隔离足够强，网络默认与宿主共享
 #                （DSH_NETNS=1 可补上独立 netns）
-#   3 uid        独立 OS 用户 + DAC：只有文件维度，无 ns。最后一档
-#   4 none       无隔离，必须 DSH_ALLOW_UNCONFINED=1 显式放行，仅供排障
+#   3 landlock   内核的非特权自我沙箱：文件系统 + TCP 端口 + 信号隔离。
+#                【不需要 root、不需要 userns、不需要任何人配合】——
+#                前两档在受限容器里全断时，这一档往往还活着
+#   4 uid        独立 OS 用户 + DAC：只有文件维度，无 ns
+#   5 none       无隔离，必须 DSH_ALLOW_UNCONFINED=1 显式放行，仅供排障
 #
-# 一律 FAIL-CLOSED：四档都不成立时【拒绝启动实例】，而不是退回裸跑。
+# 一律 FAIL-CLOSED：所有档都不成立时【拒绝启动实例】，而不是退回裸跑。
 # =====================================================================
 set -euo pipefail
 
@@ -34,7 +39,7 @@ BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/backends"
 # 强制指定后端：auto（默认）| container | bwrap | uid | none
 DSH_ISOLATION="${DSH_ISOLATION:-auto}"
 # 自动挑选时的顺序，按隔离强度从强到弱
-AUTO_ORDER="container bwrap uid none"
+AUTO_ORDER="container bwrap landlock uid none"
 
 log() { echo "[isolate] $*" >&2; }
 
@@ -100,6 +105,12 @@ env_report() {
     item "非特权 userns" "被拦（$([ -r "$aa" ] && echo "apparmor_restrict_unprivileged_userns=$(cat "$aa")" || echo "sysctl 限制")）"
   fi
   item "CAP_SYS_ADMIN" "$(have_cap_sys_admin && echo 有 || echo 无)"
+  local ll; ll=$(python3 -c 'import ctypes;l=ctypes.CDLL(None,use_errno=True);print(l.syscall(444,None,0,1))' 2>/dev/null || echo -1)
+  if [ "${ll:-0}" -ge 1 ] 2>/dev/null; then
+    item "Landlock" "ABI v$ll（内核支持非特权自我沙箱）"
+  else
+    item "Landlock" "不支持（需要内核 5.13+ 且 landlock 在 LSM 列表里）"
+  fi
   if command -v docker >/dev/null 2>&1; then
     if docker info >/dev/null 2>&1; then
       item "docker" "客户端在，守护进程可达"
@@ -125,7 +136,7 @@ env_report() {
     return 0
   fi
   echo
-  echo "选定: 无 —— 四档隔离全不可用，实例将【拒绝启动】"
+  echo "选定: 无 —— 各档隔离全不可用，实例将【拒绝启动】"
   return 1
 }
 
@@ -146,7 +157,7 @@ case "${1:-}" in
       echo "OK $SELECTED ${SELECTED_DETAIL#OK }"
       exit 0
     fi
-    log "四档隔离全不可用，实例将拒绝启动。逐项原因:"
+    log "各档隔离全不可用，实例将拒绝启动。逐项原因:"
     select_backend 1 >&2 || true
     log "完整报告: $0 --report"
     echo "UNAVAILABLE"
@@ -161,7 +172,7 @@ DSH_HOME_DIR="${3:?缺少 dsh_home}"
 WORKSPACE="${4:?缺少 workspace}"
 
 if ! select_backend; then
-  log "四档隔离全不可用，拒绝启动 $USERNAME 的实例（fail-closed）。逐项原因:"
+  log "各档隔离全不可用，拒绝启动 $USERNAME 的实例（fail-closed）。逐项原因:"
   select_backend 1 >&2 || true
   log "完整报告: $0 --report"
   log "排障临时放行（危险，全公司文件对该实例敞开）: DSH_ALLOW_UNCONFINED=1"

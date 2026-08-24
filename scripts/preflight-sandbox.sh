@@ -147,9 +147,10 @@ echo "=== 3. 逃逸面 ==="
 echo
 echo "=== 4. 进程隔离 ==="
 P=$(g PROCS)
-if [ "$BACKEND" = "uid" ]; then
-  # uid 档只有文件维度的强制点，本来就没有 pid ns。如实标注，不伪装成通过。
-  info "PID 命名空间" "$P 个进程可见 —— uid 后端【不提供】进程隔离（见 backends/uid.sh 文件头）"
+if [ "$BACKEND" = "uid" ] || [ "$BACKEND" = "landlock" ]; then
+  # 这两档都没有 pid namespace（uid 只有 DAC，landlock 只管文件/网络/信号）。
+  # 如实标注成 info，不伪装成通过。
+  info "PID 命名空间" "$P 个进程可见 —— $BACKEND 后端【不提供】进程隔离（见 backends/$BACKEND.sh 文件头）"
 else
   [ "${P:-999}" -lt 20 ] && ok "PID 命名空间隔离" "仅 $P 个进程可见（ps 看不到宿主进程）" \
                          || bad "PID 命名空间未隔离" "$P 个进程可见"
@@ -162,6 +163,9 @@ if [ "$BACKEND" = "container" ]; then
   LEFTOVER=$(ss -ltn 2>/dev/null | grep -cE '0\.0\.0\.0:(3080|131[0-9][0-9])' || true)
   [ "${LEFTOVER:-0}" = "0" ] && ok "dsh 端口未暴露到 0.0.0.0" \
                              || bad "有 $LEFTOVER 个 dsh 端口监听在 0.0.0.0" "局域网可直连实例"
+elif [ "$BACKEND" = "landlock" ]; then
+  info "网络隔离" "Landlock TCP 端口限制：只允许监听本人端口 + 外连白名单端口"
+  info "" "别人的实例端口不在白名单里，「驱动同事的 agent」这条路已封（需 ABI v4+）"
 elif [ "${DSH_NETNS:-0}" = "1" ]; then
   info "网络隔离模式" "已启用（每实例独立 netns，入站走 unix socket）"
   if command -v pasta >/dev/null 2>&1 && command -v socat >/dev/null 2>&1; then

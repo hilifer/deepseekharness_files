@@ -31,7 +31,8 @@ echo 'export default 1' > "$R/.local/share/dsh/profiles/index.mjs"
 cp "$REPO/admin/core.py" "$REPO/admin/cli.py" "$R/admin/"
 # 隔离层是「调度器 + 各后端 + 容器入口脚本」，少拷一个都会在运行时才炸
 cp "$REPO/dsh-runtime/dsh-sandbox.sh" "$REPO/dsh-runtime/dsh-netns-entry.sh" \
-   "$REPO/dsh-runtime/dsh-container-entry.sh" "$R/dsh-runtime/"
+   "$REPO/dsh-runtime/dsh-container-entry.sh" "$REPO/dsh-runtime/dsh-landlock-exec.py" \
+   "$R/dsh-runtime/"
 cp "$REPO"/dsh-runtime/backends/*.sh "$R/dsh-runtime/backends/"
 cp "$REPO/dsh-runtime/Dockerfile.instance" "$R/dsh-runtime/"
 cp "$REPO/scripts/preflight-sandbox.sh" "$R/scripts/"
