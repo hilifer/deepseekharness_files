@@ -227,9 +227,22 @@ apply_rlimits() {
 # 指向 dsh-files 根、指向 departments 本身、指向外部路径，一律拒绝启动——
 # 那些都等于把远超本人空间的范围挂进实例。
 DSH_FILES_ROOT="${DSH_FILES_ROOT:-$DSH_ROOT/dsh-files}"
-assert_workspace_contained() { # $1=workspace(已存在)
-  local ws depts rel
+# 内置管理员的空间【就是】全公司根（start-all.sh 用 dsh-files 起 3080 那个实例），
+# 这是设计如此，不是越权。但「工作区 = 公司根」这件事只有 admin 能做，
+# 所以判定必须带上身份——只看路径分不出 admin 和一个被放大了工作区的员工。
+DSH_ROOT_SPACE_USER="${DSH_ROOT_SPACE_USER:-admin}"
+assert_workspace_contained() { # $1=workspace(已存在) $2=username
+  local ws depts rel files
   ws=$(readlink -f "$1") || die "工作区路径解析失败: $1"
+  files=$(readlink -f "$DSH_FILES_ROOT" 2>/dev/null || echo "")
+  if [ -n "$files" ] && [ "$ws" = "$files" ]; then
+    if [ "${2:-}" = "$DSH_ROOT_SPACE_USER" ]; then
+      return 0
+    fi
+    die "只有内置管理员的工作区可以是全公司根，$2 不行，拒绝启动: $ws
+       员工/主管的工作区必须是 departments/<部门>[/<姓名>]。
+       登记表里出现这种记录，通常是被手改或从旧数据恢复过——请在管理后台重设部门与姓名。"
+  fi
   depts=$(readlink -f "$DSH_FILES_ROOT/departments" 2>/dev/null) || {
     log "注意: $DSH_FILES_ROOT/departments 不存在，跳过收容校验（非标准部署树）"
     return 0
@@ -252,5 +265,5 @@ validate_run_args() { # $1=port $2=dsh_home $3=workspace
   [ -d "$2" ] || die "DSH_HOME 不存在: $2"
   [ -d "$3" ] || die "工作区不存在: $3"
   [ -d "$NODE_ROOT" ] || die "node 目录不存在: $NODE_ROOT"
-  [ "${DSH_SKIP_WORKSPACE_CHECK:-0}" = "1" ] || assert_workspace_contained "$3"
+  [ "${DSH_SKIP_WORKSPACE_CHECK:-0}" = "1" ] || assert_workspace_contained "$3" "${4:-}"
 }

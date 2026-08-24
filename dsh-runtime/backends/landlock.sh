@@ -106,7 +106,7 @@ backend_run() {
   local py; py=$(python_bin)
   [ -n "$py" ] || die "缺 python3（调度器本应先 probe 过）"
   [ -r "$LANDLOCK_EXEC" ] || die "找不到上锁器: $LANDLOCK_EXEC"
-  validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE"
+  validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE" "$USERNAME"
   if ! ptrace_hardened; then
     die "yama ptrace_scope=$(ptrace_scope_value)，同 uid 实例之间可互相 ptrace 劫持读走对方工作区，拒绝启动。
        处理: sysctl -w kernel.yama.ptrace_scope=1；或换 container/bwrap/uid 档；

@@ -252,7 +252,7 @@ backend_run() {
   if docker_socket_live; then
     die "检测到连得通的 docker socket，UID 隔离在它面前无效，拒绝启动（请改用 container 后端）"
   fi
-  validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE"
+  validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE" "$USERNAME"
 
   WORKSPACE=$(readlink -f "$WORKSPACE")
   DSH_HOME_DIR=$(readlink -f "$DSH_HOME_DIR")

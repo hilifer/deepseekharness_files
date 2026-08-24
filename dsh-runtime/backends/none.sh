@@ -38,7 +38,7 @@ backend_run() {
   local DSH_HOME_DIR="${3:?缺少 dsh_home}" WORKSPACE="${4:?缺少 workspace}"
 
   [ "${DSH_ALLOW_UNCONFINED:-0}" = "1" ] || die "未显式放行，拒绝无隔离启动"
-  validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE"
+  validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE" "$USERNAME"
   warn_loudly "$USERNAME"
 
   WORKSPACE=$(readlink -f "$WORKSPACE")

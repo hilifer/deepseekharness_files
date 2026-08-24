@@ -635,7 +635,7 @@ class TestRegistryAndStatus(TempCase):
         早先路径解析不出 departments/<部门>/<姓名> 结构时仍然照收，员工在 dsh 里
         「添加工作区」指到 dsh-files 根，再赶上一次 registry.json 重建，迁移就会
         把【全公司根目录】写成他的工作区——沙箱据此 rw 挂载、钳制根据此设定、
-        FileBrowser scope 据此推导。现场就是这么变成「工作区 = 公司文件」的。
+        FileBrowser scope 据此推导，三层一起放大。
         """
         self.cfg.users_root.mkdir(parents=True, exist_ok=True)
         self.cfg.legacy_ports.write_text(json.dumps({"zhangsan": 13101}), encoding="utf-8")
@@ -673,6 +673,19 @@ class TestRegistryAndStatus(TempCase):
         with self.assertRaises(ProvisionError) as cm:
             self.engine.dsh_start("zhangsan", rec)
         self.assertIn("不在", str(cm.exception))
+
+
+    def test_admin_may_have_company_root_as_workspace(self):
+        """内置管理员的空间【就是】全公司根，这是设计如此，不能被收容校验挡掉。
+
+        start-all.sh 用 dsh-files 起 3080 那个 admin 实例。只看路径分不出
+        admin 和一个工作区被放大了的员工，所以判定必须带身份。
+        """
+        self.engine._assert_workspace_contained("admin", self.cfg.files_root)
+
+    def test_non_admin_may_not_have_company_root(self):
+        with self.assertRaises(ProvisionError):
+            self.engine._assert_workspace_contained("zhangsan", self.cfg.files_root)
 
     def test_trusted_hosts_include_all_three_entry_domains(self):
         """只传公网 IP 的话，云 NAT 场景下本机与局域网访问会被 dsh 拒绝。"""

@@ -152,7 +152,7 @@ backend_run() {
   local DSH_HOME_DIR="${3:?缺少 dsh_home}" WORKSPACE="${4:?缺少 workspace}"
 
   find_bwrap || die "bwrap 不可用（调度器本应先 probe 过）"
-  validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE"
+  validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE" "$USERNAME"
 
   # 工作区必须是真实路径（解析符号链接），否则 --bind 会把链接目标挂进来，
   # 等于给了一条绕过隔离的路。

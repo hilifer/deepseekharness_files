@@ -418,10 +418,11 @@ class Engine:
         # 证明不了就整条丢弃，留空让管理员在后台补。
         #
         # 早先这里在 relative_to 抛 ValueError 时仍然 `return out`，等于把员工
-        # 写进那个文件的【任意绝对路径】当成工作区收下——员工在 dsh 里「添加工作区」
-        # 指到 dsh-files 根，再赶上一次 registry.json 重建，迁移就会把全公司根目录
-        # 写成他的工作区：沙箱据此 rw 挂载、钳制根据此设定、FileBrowser scope 据此推导。
-        # 现场就是这么变成「工作区 = 公司文件」的。
+        # 写进那个文件的【任意绝对路径】当成工作区收下。可达路径：员工在 dsh 里
+        # 「添加工作区」指到 dsh-files 根，再赶上一次 registry.json 重建（恢复备份
+        # 或首次迁移），全公司根目录就成了他的工作区——沙箱据此 rw 挂载、钳制根据此
+        # 设定、FileBrowser scope 据此推导，三层一起放大。
+        # 【未在现场发生过】：这是代码审计发现的潜在路径，不是事故复盘。
         try:
             rel = path.resolve().relative_to(self.cfg.departments.resolve()).parts
         except (ValueError, OSError):
@@ -697,6 +698,10 @@ class Engine:
         实例拉起来。
         """
         depts = self.cfg.departments.resolve()
+        # 内置管理员的空间就是全公司根（admin_space()），设计如此。
+        # 但只看路径分不出 admin 和一个工作区被放大了的员工，所以判定带身份。
+        if username == "admin" and workspace.resolve() == self.cfg.files_root.resolve():
+            return
         try:
             rel = workspace.resolve().relative_to(depts).parts
         except (ValueError, OSError):

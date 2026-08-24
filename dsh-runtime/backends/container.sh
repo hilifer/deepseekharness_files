@@ -229,7 +229,7 @@ backend_run() {
   local DSH_HOME_DIR="${3:?缺少 dsh_home}" WORKSPACE="${4:?缺少 workspace}"
 
   docker_ok || die "docker 不可用（调度器本应先 probe 过）"
-  validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE"
+  validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE" "$USERNAME"
   image_ok || die "镜像不存在: $DSH_IMAGE（scripts/build-dsh-image.sh）"
   resolve_pathmap || die "定不出可用的宿主路径映射，拒绝以错误的挂载启动实例"
 
