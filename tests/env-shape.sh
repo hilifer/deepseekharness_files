@@ -11,6 +11,12 @@
 # SHAPE_BLOCK_USERNS=1 时，本脚本先确认这个形状里非特权 user namespace 确实
 # 用不了；如果居然能用（runner 的内核开关和预期不符），就直接把 bwrap 挪走，
 # 并把这件事打出来——模拟没模拟成必须写在脸上，不能让 CI 假绿。
+#
+# SHAPE_START_DOCKERD=1 时，先在【本容器内部】启动一个自己的 dockerd，再用它
+# 构建实例镜像。这构造的是【真·嵌套】：员工容器是本容器的孩子，不是兄弟。
+# 与「挂宿主 socket」那种形状的区别在于路径——嵌套下容器内外路径同构，
+# 自省宿主 Mounts 必然失败（内层守护进程不认识外层容器），走的是恒等映射那条
+# 候选分支。这条分支此前没有任何测试覆盖。
 # =====================================================================
 set -uo pipefail
 
@@ -45,6 +51,27 @@ fi
 
 say "搭仿真部署树 -> $R"
 "$REPO/scripts/make-fake-deploy.sh" "$R" "$REPO" || fail "建树失败"
+
+if [ "${SHAPE_START_DOCKERD:-0}" = "1" ]; then
+  say "在本容器内启动 dockerd（真·嵌套：员工容器将是本容器的孩子）"
+  [ "$(id -u)" = "0" ] || fail "启动 dockerd 需要 root —— 这正是嵌套的硬前提"
+  command -v dockerd >/dev/null 2>&1 || fail "本镜像里没有 dockerd"
+  # vfs 存储驱动：overlay-on-overlay 在很多内核上不被允许，vfs 慢但一定能用
+  dockerd --storage-driver=vfs > /tmp/dockerd.log 2>&1 &
+  for _ in $(seq 1 40); do docker info >/dev/null 2>&1 && break; sleep 1; done
+  if ! docker info >/dev/null 2>&1; then
+    echo "--- dockerd 日志尾部"; tail -40 /tmp/dockerd.log
+    fail "内层 dockerd 起不来（多半是容器权限不够，需要 --privileged）"
+  fi
+  echo "  ✓ 内层 dockerd 就绪: $(docker info --format '{{.Name}} 存储驱动={{.Driver}}')"
+  # 这里必须确认它【不是】外层的守护进程：内层的看不到任何已有容器
+  echo "  · 它管着的容器数: $(docker info --format '{{.Containers}}')"
+
+  say "用内层 dockerd 构建实例镜像"
+  DSH_ROOT="$R" bash "$REPO/scripts/build-dsh-image.sh" >/tmp/build.log 2>&1 \
+    || { tail -30 /tmp/build.log; fail "实例镜像构建失败"; }
+  echo "  ✓ $(docker images --format '{{.Repository}}:{{.Tag}}' | head -3 | tr '\n' ' ')"
+fi
 
 say "环境能力报告"
 bash "$SANDBOX" --report 2>&1 | sed 's/^/  /'

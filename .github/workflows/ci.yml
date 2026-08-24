@@ -364,24 +364,35 @@ jobs:
             nonroot: 'yes'
             block_userns: '1'
             need_image: 'no'
+            dind: 'no'
           - shape: 容器·root·无命名空间·无docker
             expect: uid
             args: ''
             nonroot: 'no'
             block_userns: '1'
             need_image: 'no'
+            dind: 'no'
           - shape: 容器·非root·无命名空间·挂了宿主docker-socket
             expect: container
             args: '-v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker:ro'
             nonroot: 'yes'
             block_userns: '1'
             need_image: 'yes'
+            dind: 'no'
           - shape: 容器·root·特权
             expect: bwrap
             args: '--privileged'
             nonroot: 'no'
             block_userns: '0'
             need_image: 'no'
+            dind: 'no'
+          - shape: 容器·特权·容器内自跑dockerd（真嵌套）
+            expect: container
+            args: '--privileged'
+            nonroot: 'no'
+            block_userns: '0'
+            need_image: 'no'
+            dind: 'yes'
     steps:
       - uses: actions/checkout@v4
 
@@ -409,6 +420,19 @@ jobs:
           DOCKERFILE
           docker build -t ci-shape:base -f "$RUNNER_TEMP/Dockerfile.shape" "$RUNNER_TEMP"
 
+      - name: 为嵌套形状加装 docker 引擎
+        if: matrix.dind == 'yes'
+        # 真·嵌套需要容器【自己】跑 dockerd，所以引擎得装在形状镜像里。
+        # 只有这一个形状需要，别的形状不背这个体积和构建时间。
+        run: |
+          cat > "$RUNNER_TEMP/Dockerfile.dind" <<'DOCKERFILE'
+          FROM ci-shape:base
+          RUN apt-get update && apt-get install -y --no-install-recommends \
+                docker.io \
+           && rm -rf /var/lib/apt/lists/*
+          DOCKERFILE
+          docker build -t ci-shape:dind -f "$RUNNER_TEMP/Dockerfile.dind" "$RUNNER_TEMP"
+
       - name: 构建实例镜像（只有 container 形状需要）
         if: matrix.need_image == 'yes'
         run: DSH_ROOT="$PWD" scripts/build-dsh-image.sh
@@ -428,13 +452,17 @@ jobs:
           fi
           # 刻意把仓库挂到【和宿主不同的路径】/deploy 上：容器后端必须自己
           # 算出「/deploy/... 在宿主上是 $PWD/...」才能挂对，路径同构就验不到了。
+          IMAGE=ci-shape:base
+          START_DOCKERD=0
+          if [ "${{ matrix.dind }}" = "yes" ]; then IMAGE=ci-shape:dind; START_DOCKERD=1; fi
           # shellcheck disable=SC2086
           docker run --rm \
             -v "$PWD:/deploy" -w /deploy \
             -e REPO=/deploy \
             -e "SHAPE_BLOCK_USERNS=${{ matrix.block_userns }}" \
+            -e "SHAPE_START_DOCKERD=$START_DOCKERD" \
             $ARGS \
-            ci-shape:base \
+            "$IMAGE" \
             bash /deploy/tests/env-shape.sh "${{ matrix.expect }}" /deploy/fakedeploy \
             2>&1 | tee "$RUNNER_TEMP/shape.txt"
 
