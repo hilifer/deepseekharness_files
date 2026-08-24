@@ -177,6 +177,25 @@ resolve_pathmap() {
 
 container_name() { echo "$DSH_CONTAINER_PREFIX-$1"; }
 
+# 资源限额不是哪里都给得了：DinD、rootless、cgroup 控制器没下放的环境里，
+# --memory / --cpus / --pids-limit 会让 docker run 直接失败。问一下守护进程
+# 到底支持哪几样，不支持的丢掉并【明说丢了什么】——静默降级会让人以为限额生效。
+build_limit_args() {
+  LIMIT_ARGS=()
+  local caps dropped=""
+  caps=$("$DOCKER_BIN" info --format \
+    '{{.MemoryLimit}} {{.CPUCfsQuota}} {{.PidsLimit}}' 2>/dev/null) || caps=""
+  local mem cpu pids
+  read -r mem cpu pids <<< "${caps:-false false false}"
+  if [ "$mem" = "true" ]; then LIMIT_ARGS+=(--memory "$DSH_CONTAINER_MEMORY")
+  else dropped="$dropped --memory"; fi
+  if [ "$cpu" = "true" ]; then LIMIT_ARGS+=(--cpus "$DSH_CONTAINER_CPUS")
+  else dropped="$dropped --cpus"; fi
+  if [ "$pids" = "true" ]; then LIMIT_ARGS+=(--pids-limit "$DSH_CONTAINER_PIDS")
+  else dropped="$dropped --pids-limit"; fi
+  [ -z "$dropped" ] || log "本守护进程不支持这些限额，已跳过:$dropped（隔离本身不受影响，但一个员工可以吃光资源）"
+}
+
 # ---------- probe ----------
 backend_probe() {
   if ! command -v "$DOCKER_BIN" >/dev/null 2>&1; then
@@ -229,13 +248,14 @@ backend_run() {
     --user "$uid:$gid"
     # 逃逸面收干净：不给任何 capability，禁止 setuid 提权
     --cap-drop ALL --security-opt no-new-privileges
-    # 一个员工跑爆资源不该拖垮所有人
-    --memory "$DSH_CONTAINER_MEMORY" --cpus "$DSH_CONTAINER_CPUS"
-    --pids-limit "$DSH_CONTAINER_PIDS"
     -p "$DSH_PUBLISH_ADDR:$PORT:$PORT"
     -w "$WORKSPACE"
     -e "DSH_INNER_PORT=$DSH_INNER_PORT"
   )
+
+  # 一个员工跑爆资源不该拖垮所有人——但限额得守护进程支持才加得上
+  build_limit_args
+  args+=("${LIMIT_ARGS[@]}")
 
   local hp
   # 只读：node + dsh 本体、共享插件、容器入口脚本

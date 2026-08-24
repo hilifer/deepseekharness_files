@@ -105,12 +105,28 @@ if reg.exists():
 PY
 )
 
+# stderr 留档而不是丢掉：探针一个字都没输出时，真正的原因全在 stderr 里。
+# 早先这里直接 2>/dev/null，实例根本没起来也只会表现成「16 项全红」，
+# 让人以为隔离失效，其实是启动失败——两种情况的处置完全不同。
+PROBE_ERR="$HOME_DIR/.preflight-probe.err"
 RES=$(DSH_ROOT="$DSH_ROOT" DSH_NODE_BIN=/bin/bash DSH_BIN="$HOME_DIR/.preflight-probe.sh" \
       DSH_SANDBOX_PASSENV="P_ROOT P_WS P_USER P_CANARY P_PEER_PORT" \
       P_ROOT="$DSH_ROOT" P_WS="$WS" P_USER="$USERNAME" P_CANARY="${CANARY:-/nonexistent}" \
       P_PEER_PORT="$PEER_PORT" \
-      "$SANDBOX" "$USERNAME" 13999 "$HOME_DIR" "$WS" 2>/dev/null)
+      "$SANDBOX" "$USERNAME" 13999 "$HOME_DIR" "$WS" 2>"$PROBE_ERR")
 rm -f "$HOME_DIR/.preflight-probe.sh" "$CANARY"
+
+if ! printf '%s' "$RES" | grep -q '='; then
+  echo
+  bad "探针没有任何输出" "实例没起来，不是隔离失效——下面是启动时的报错"
+  echo "---- 启动输出 ----"
+  tail -40 "$PROBE_ERR" 2>/dev/null || echo "(无)"
+  echo "------------------"
+  rm -f "$PROBE_ERR"
+  echo "先把实例起得来，再谈隔离验收。"
+  exit 1
+fi
+rm -f "$PROBE_ERR"
 
 g() { printf '%s\n' "$RES" | sed -n "s/^$1=//p" | head -1; }
 

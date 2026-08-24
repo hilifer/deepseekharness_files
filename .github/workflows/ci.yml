@@ -366,14 +366,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shape: 容器·非root·无命名空间·无docker
-            expect: refuse
+          - shape: 容器·非root·无命名空间·无docker（自动落到Landlock）
+            expect: landlock
             args: ''
             nonroot: 'yes'
             block_userns: '1'
             need_image: 'no'
             dind: 'no'
             isolation: 'auto'
+          - shape: 容器·非root·连Landlock也没有（必须拒绝启动）
+            expect: refuse
+            args: ''
+            nonroot: 'yes'
+            block_userns: '1'
+            need_image: 'no'
+            dind: 'no'
+            # 候选里刻意不含 container/landlock：验的是「一档都不成立时
+            # 到底拒不拒绝」，带上还活着的档就验不到 fail-closed 了
+            isolation: 'bwrap uid none'
           - shape: 容器·root·无命名空间·无docker
             expect: uid
             args: ''
@@ -381,7 +391,9 @@ jobs:
             block_userns: '1'
             need_image: 'no'
             dind: 'no'
-            isolation: 'auto'
+            # 钉死 uid：auto 现在会优先挑 landlock（那是对的，它更强），
+            # 但 uid 档本身也要有人验
+            isolation: 'uid'
           - shape: 容器·非root·无命名空间·挂了宿主docker-socket
             expect: container
             args: '-v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker:ro'
