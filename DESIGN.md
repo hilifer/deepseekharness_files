@@ -98,10 +98,19 @@ userns 通不通、有没有 CAP_SYS_ADMIN、Landlock ABI 多少、docker 够不
 | 连不到别人的实例端口 | ✔ netns | 需 `DSH_NETNS=1` | ✔ TCP 端口白名单（ABI v4+） | ✘ | ✘ |
 | kill 不到别人的进程 | ✔ | ✔ | ✔ scope（ABI v6+） | ✘ | ✘ |
 | 读不到别人进程的 environ/内存 | ✔ pid ns | ✔ pid ns | △ 需 yama≥1（同 uid） | ✔ 异 uid | ✘ |
-| 资源限额（内存/CPU/进程数） | ✔ | ✘ | ✘ | ✘ | ✘ |
+| 资源限额（内存/CPU/进程数） | ✔ cgroup | △ RLIMIT | △ RLIMIT | △ RLIMIT | ✘ |
 | docker socket 逃逸 | ✔ 不挂进去 | ✔ 不挂 `/var` | ✔ 不放行 `/var` | ✘ **一票否决** | ✘ |
 | 主管的部门级权限 | ✔ 多挂一个卷 | ✔ 多挂一个 bind | ✔ 多加一条规则 | 需文件系统支持 ACL | — |
 | 前提 | 够得到 dockerd | userns 或 root+CAP_SYS_ADMIN | **内核 5.13+，仅此而已** | 容器内 root 且无 docker socket | 显式放行 |
+
+资源限额分两种,别混为一谈:container 档是 **cgroup**,按【实际驻留内存】算,
+各容器独立;其余三档只能上 **RLIMIT**(`apply_rlimits`,默认 nproc=512、
+nofile=4096、core=0)。两点要说清:
+
+- 默认【不设】RLIMIT_AS。V8 会预留远超实际用量的虚拟地址空间,设了 `-v` 之后
+  node 经常直接起不来。要按真实内存限,只有 container 档的 cgroup 做得到。
+- landlock / bwrap 是同 uid,**RLIMIT_NPROC 按 uid 全局计数**。它挡得住单个实例的
+  fork 炸弹,但同僚之间共享同一个进程数池——要各算各的,还是得 container 档。
 
 `landlock` 档有一处必须讲清的命门：它不需要 root，代价是【所有实例同一个 OS
 用户】。同 uid 之间，Landlock 管得了文件路径，管不了 `/proc/<别人 pid>` 与

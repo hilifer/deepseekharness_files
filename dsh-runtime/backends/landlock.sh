@@ -133,12 +133,28 @@ backend_run() {
   for d in /proc /dev; do
     [ -e "$d" ] && args+=(--rwio "$d")
   done
-  # 这两个例外必须给完整读写，否则 node 起不来：
-  #   /dev/shm      共享内存要能创建文件（rwio 不给 make_reg）
-  #   /run/user/UID XDG 运行时目录，一些工具会往里写
-  # 它们都是本用户专属或全局临时区，不含员工数据。
-  [ -d /dev/shm ] && args+=(--rw /dev/shm)
-  [ -d "/run/user/$(id -u)" ] && args+=(--rw "/run/user/$(id -u)")
+  # /dev/shm 与 /run/user/UID 要能写（node 与一些工具依赖），但【不能整个放行】：
+  # 本档所有实例同一个 uid，整个放行等于给同僚开了一块共享读写区——
+  # /run/user/UID 尤其不能，各类工具的 socket 和临时凭据就放那儿。
+  # 所以每人一个私有子目录，只放行那一个；XDG_RUNTIME_DIR 指过去。
+  local privshm="" privrun=""
+  if [ -d /dev/shm ]; then
+    privshm="/dev/shm/dsh-$USERNAME"
+    mkdir -p "$privshm" 2>/dev/null || true
+    chmod 700 "$privshm" 2>/dev/null || true
+    args+=(--rw "$privshm")
+    # 逃生阀：某些程序硬要在 /dev/shm 根下建文件（如 chromium）。开了就退回共享。
+    if [ "${DSH_LANDLOCK_SHARE_SHM:-0}" = "1" ]; then
+      log "⚠ DSH_LANDLOCK_SHARE_SHM=1：整个 /dev/shm 放行，同 uid 同僚之间可互读"
+      args+=(--rw /dev/shm)
+    fi
+  fi
+  if [ -d "/run/user/$(id -u)" ]; then
+    privrun="/run/user/$(id -u)/dsh-$USERNAME"
+    mkdir -p "$privrun" 2>/dev/null || true
+    chmod 700 "$privrun" 2>/dev/null || true
+    args+=(--rw "$privrun")
+  fi
 
   # 程序本体与共享插件：只读，员工改不了 dsh 也改不了别人的插件
   args+=(--ro "$NODE_ROOT")
@@ -172,11 +188,13 @@ backend_run() {
   build_instance_env "$USERNAME" "$DSH_HOME_DIR" "$WORKSPACE" "$ALLOWED_ROOTS"
   build_trusted_host_args
 
-  # 环境按白名单重建（与其它后端同一份），外加私有 TMPDIR
+  # 环境按白名单重建（与其它后端同一份），外加私有 TMPDIR / XDG_RUNTIME_DIR
   local envargs=(env -i "TMPDIR=$privtmp" "TMP=$privtmp" "TEMP=$privtmp")
+  [ -n "$privrun" ] && envargs+=("XDG_RUNTIME_DIR=$privrun")
   local kv
   for kv in "${INSTANCE_ENV[@]}"; do envargs+=("$kv"); done
 
+  apply_rlimits
   cd "$WORKSPACE"
   log "启动 $USERNAME: port=$PORT ws=$WORKSPACE (Landlock 自我沙箱)"
   exec "${envargs[@]}" "$py" "$LANDLOCK_EXEC" "${args[@]}" -- \

@@ -283,6 +283,7 @@ backend_run() {
   fw_seal_peer_ports "$uid" "$PORT"
   fw_assert_sealed "$uid"
 
+  apply_rlimits
   cd "$WORKSPACE"
   log "启动 $USERNAME: port=$PORT ws=$WORKSPACE (os 用户 $osuser/$uid, DAC 隔离)"
   if command -v setpriv >/dev/null 2>&1; then

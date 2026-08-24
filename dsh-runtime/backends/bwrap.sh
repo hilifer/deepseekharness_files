@@ -255,6 +255,7 @@ backend_run() {
   local kv
   for kv in "${INSTANCE_ENV[@]}"; do args+=(--setenv "${kv%%=*}" "${kv#*=}"); done
 
+  apply_rlimits
   build_trusted_host_args
 
   if [ "$DSH_NETNS" != "1" ]; then

@@ -182,6 +182,43 @@ build_trusted_host_args() {
   for h in $DSH_TRUSTED_HOSTS; do HOST_ARGS+=(--trusted-host "$h"); done
 }
 
+# ---------- 资源限额（非 container 档）----------
+# container 档有 cgroup（见 container.sh 的 build_limit_args）；其余三档没有任何
+# 限额，一个员工的 fork 炸弹或内存膨胀会拖垮整机——所有人一起完蛋。
+# RLIMIT 是进程属性，exec 后继承，所以在 exec 前设一次就够。
+#
+# 【为什么默认不设 RLIMIT_AS】V8 会预留大量【虚拟】地址空间（远超实际用量），
+# 设了 -v 之后 node 经常直接起不来。要限内存请用 container 档的 cgroup，
+# 那才是按【实际驻留】算的。这里留出开关，但默认空。
+DSH_RLIMIT_NPROC="${DSH_RLIMIT_NPROC:-512}"     # 进程数，挡 fork 炸弹
+DSH_RLIMIT_NOFILE="${DSH_RLIMIT_NOFILE:-4096}"  # 打开文件数
+DSH_RLIMIT_FSIZE="${DSH_RLIMIT_FSIZE:-}"        # 单文件大小(block)，空=不限
+DSH_RLIMIT_AS="${DSH_RLIMIT_AS:-}"              # 虚拟内存(KB)，空=不限，见上
+
+apply_rlimits() {
+  # 崩溃转储可能很大又没人看，直接关掉，顺带免得写满磁盘
+  ulimit -c 0 2>/dev/null || true
+  local applied=""
+  if [ -n "$DSH_RLIMIT_NPROC" ] && ulimit -u "$DSH_RLIMIT_NPROC" 2>/dev/null; then
+    applied="$applied nproc=$DSH_RLIMIT_NPROC"
+  fi
+  if [ -n "$DSH_RLIMIT_NOFILE" ] && ulimit -n "$DSH_RLIMIT_NOFILE" 2>/dev/null; then
+    applied="$applied nofile=$DSH_RLIMIT_NOFILE"
+  fi
+  if [ -n "$DSH_RLIMIT_FSIZE" ] && ulimit -f "$DSH_RLIMIT_FSIZE" 2>/dev/null; then
+    applied="$applied fsize=$DSH_RLIMIT_FSIZE"
+  fi
+  if [ -n "$DSH_RLIMIT_AS" ] && ulimit -v "$DSH_RLIMIT_AS" 2>/dev/null; then
+    applied="$applied as=$DSH_RLIMIT_AS"
+  fi
+  log "资源限额:${applied:- 无（设不上，多半是已有更低的硬限制）} core=0"
+  # 同 uid 的档（landlock / bwrap）要说清楚 nproc 的真实语义，别让人以为是每人独立配额
+  if [ "$BACKEND_TAG" = "landlock" ] || [ "$BACKEND_TAG" = "bwrap" ]; then
+    log "  注意: 本档同 uid，RLIMIT_NPROC 是【按 uid 全局计数】的——它挡得住单个"
+    log "  实例的 fork 炸弹，但同僚之间仍共享这个进程数池。要真正各算各的用 container 档。"
+  fi
+}
+
 # 各后端 run 之前统一做的参数校验
 validate_run_args() { # $1=port $2=dsh_home $3=workspace
   [[ "$1" =~ ^[0-9]{2,5}$ ]] || die "端口不合法: $1"

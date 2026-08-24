@@ -88,6 +88,25 @@ echo "ADMAPI=$(code -H 'Remote-User: admin' http://127.0.0.1:19200/admin/api/use
 # 同僚端口由外层通过 P_PEER_PORT 传入：沙箱内读不到 registry.json 是【预期行为】，
 # 不能因此把这项测试跳过。顺带把「能否读到登记表」本身也作为一项断言。
 echo "REGISTRY=$(r "$P_ROOT/dsh-users/registry.json")"
+# 同 uid 档（landlock）的三条旁路。它们都【不经过路径规则】，所以必须实测：
+#   PEERFD  经 /proc/<同僚 pid>/fd/ 重开对方【已打开】的文件。这是 magic symlink
+#           重开，绕过路径解析——Landlock 到底拦不拦，只有真跑一次才知道。
+#   SHMPEER /dev/shm 若整个放行，同 uid 之间就是一块共享读写区
+#   RUNPEER /run/user/UID 同理，且那儿常放 socket 与临时凭据
+if [ -n "${P_PEER_PID:-}" ] && [ -d "/proc/$P_PEER_PID/fd" ]; then
+  hit=LEAKNONE
+  for fd in /proc/"$P_PEER_PID"/fd/*; do
+    tgt=$(readlink "$fd" 2>/dev/null) || continue
+    case "$tgt" in
+      *preflight-canary*) cat "$fd" >/dev/null 2>&1 && hit=LEAK || hit=SEALED ;;
+    esac
+  done
+  echo "PEERFD=$hit"
+else
+  echo "PEERFD=none"
+fi
+echo "SHMPEER=$([ -n "${P_SHM_CANARY:-}" ] && r "$P_SHM_CANARY" || echo none)"
+echo "RUNPEER=$([ -n "${P_RUN_CANARY:-}" ] && r "$P_RUN_CANARY" || echo none)"
 if [ -n "${P_PEER_PORT:-}" ]; then
   echo "PEERDSH=$(code "http://127.0.0.1:$P_PEER_PORT/")"
 else
@@ -139,14 +158,36 @@ fi
 # stderr 留档而不是丢掉：探针一个字都没输出时，真正的原因全在 stderr 里。
 # 早先这里直接 2>/dev/null，实例根本没起来也只会表现成「16 项全红」，
 # 让人以为隔离失效，其实是启动失败——两种情况的处置完全不同。
+# 同 uid 旁路的靶子：一个【持有 canary 打开状态】的同僚进程，外加 shm / run 里的标记
+PEER_HOLDER_PID=""
+SHM_CANARY=""; RUN_CANARY=""
+if [ -n "$CANARY" ]; then
+  # 拿着 canary 的 fd 睡一会儿，模拟「另一个员工的实例正开着自己工作区的文件」
+  python3 -c "import sys,time; f=open(sys.argv[1]); time.sleep(120)" "$CANARY" &
+  PEER_HOLDER_PID=$!
+fi
+if [ -d /dev/shm ]; then
+  SHM_CANARY="/dev/shm/.preflight-canary-shm"
+  echo "CANARY-PEER-SHM" > "$SHM_CANARY" 2>/dev/null || SHM_CANARY=""
+fi
+if [ -d "/run/user/$(id -u)" ]; then
+  RUN_CANARY="/run/user/$(id -u)/.preflight-canary-run"
+  echo "CANARY-PEER-RUN" > "$RUN_CANARY" 2>/dev/null || RUN_CANARY=""
+fi
+
 PROBE_ERR="$HOME_DIR/.preflight-probe.err"
 RES=$(DSH_ROOT="$DSH_ROOT" DSH_NODE_BIN=/bin/bash DSH_BIN="$HOME_DIR/.preflight-probe.sh" \
-      DSH_SANDBOX_PASSENV="P_ROOT P_WS P_USER P_CANARY P_PEER_PORT" \
+      DSH_SANDBOX_PASSENV="P_ROOT P_WS P_USER P_CANARY P_PEER_PORT P_PEER_PID P_SHM_CANARY P_RUN_CANARY" \
+      P_PEER_PID="$PEER_HOLDER_PID" P_SHM_CANARY="$SHM_CANARY" \
+      P_RUN_CANARY="$RUN_CANARY" \
       P_ROOT="$DSH_ROOT" P_WS="$WS" P_USER="$USERNAME" P_CANARY="${CANARY:-/nonexistent}" \
       P_PEER_PORT="$PEER_PORT" \
       "$SANDBOX" "$USERNAME" 13999 "$HOME_DIR" "$WS" 2>"$PROBE_ERR")
 rm -f "$HOME_DIR/.preflight-probe.sh" "$CANARY"
 [ -n "$PEER_STUB_PID" ] && kill "$PEER_STUB_PID" 2>/dev/null
+[ -n "$PEER_HOLDER_PID" ] && kill "$PEER_HOLDER_PID" 2>/dev/null
+[ -n "$SHM_CANARY" ] && rm -f "$SHM_CANARY"
+[ -n "$RUN_CANARY" ] && rm -f "$RUN_CANARY"
 
 if ! printf '%s' "$RES" | grep -q '='; then
   echo
@@ -203,6 +244,32 @@ else
   [ "${P:-999}" -lt 20 ] && ok "PID 命名空间隔离" "仅 $P 个进程可见（ps 看不到宿主进程）" \
                          || bad "PID 命名空间未隔离" "$P 个进程可见"
 fi
+
+
+echo "--- 同 uid 旁路（landlock 档所有实例同一个 OS 用户，这几条不经过路径规则）---"
+PFD=$(g PEERFD)
+case "$PFD" in
+  SEALED)   ok "经 /proc/<同僚>/fd/ 重开其文件" "被拒 —— Landlock 拦住了 magic symlink 重开" ;;
+  LEAK)     bad "经 /proc/<同僚>/fd/ 重开其文件" "读到了！这是绕过全部路径规则的跨租户直读。
+       处理：换 container / bwrap 档（有 pid ns，看不到同僚的 /proc），或升级内核" ;;
+  LEAKNONE) info "经 /proc/<同僚>/fd/" "同僚进程没有匹配的打开文件，本轮没测到" ;;
+  none)     info "经 /proc/<同僚>/fd/" "（没有同僚进程可测，跳过）" ;;
+  *)        info "经 /proc/<同僚>/fd/" "$PFD" ;;
+esac
+SH=$(g SHMPEER)
+case "$SH" in
+  SEALED) ok  "/dev/shm 中同僚留下的文件" "读不到（已改为每人私有子目录）" ;;
+  LEAK)   bad "/dev/shm 中同僚留下的文件" "可读 —— 同 uid 共享读写区" ;;
+  none)   info "/dev/shm" "埋不下标记（没有 /dev/shm 或不可写），本轮没测到" ;;
+  *)      info "/dev/shm" "$SH" ;;
+esac
+RU=$(g RUNPEER)
+case "$RU" in
+  SEALED) ok  "/run/user/UID 中同僚留下的文件" "读不到（XDG_RUNTIME_DIR 已私有化）" ;;
+  LEAK)   bad "/run/user/UID 中同僚留下的文件" "可读 —— 那里常放 socket 与临时凭据" ;;
+  none)   info "/run/user/UID" "本机没有该目录（无 systemd-logind 会话），本轮没测到" ;;
+  *)      info "/run/user/UID" "$RU" ;;
+esac
 
 echo
 echo "=== 5. 网络面 ==="
