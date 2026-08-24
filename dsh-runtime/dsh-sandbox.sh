@@ -109,10 +109,13 @@ env_report() {
   else
     item "docker" "无客户端"
   fi
-  local s found=无
-  for s in /var/run/docker.sock /run/docker.sock; do
-    [ -S "$s" ] && found="$s$([ -w "$s" ] && echo "（当前用户可写 => 可一句话逃逸到宿主）" || echo "（当前用户不可写）")"
-  done
+  # 区分「有文件」和「连得通」：死 socket 不是逃逸路径，只看文件存在会误报
+  local found=无
+  if docker_socket_live; then
+    found="连得通 => 可起兄弟容器（对员工实例而言即可逃逸到宿主）"
+  elif docker_socket_file_exists; then
+    found="有文件但连不上守护进程（dockerd 没在跑），暂不构成逃逸路径"
+  fi
   item "docker socket" "$found"
   echo
   echo "后端可用性（DSH_ISOLATION=$DSH_ISOLATION）:"

@@ -19,8 +19,8 @@
 #   ✘ 无独立 pid ns：`ps` 能看到全机进程，能看到别人的命令行参数
 #   ✘ 无独立 net ns：员工 A 能直连员工 B 的 dsh 端口驱动其 agent
 #   ✘ /tmp 共享：只能靠粘滞位，不能防同名占坑
-#   ✘ 一旦出现任何 setuid 提权点或可达的 docker socket，整层就作废
-#     （所以 probe 里显式检查 docker socket，够得到就【拒绝选用本后端】）
+#   ✘ 一旦出现任何 setuid 提权点或【连得通】的 docker socket，整层就作废
+#     （probe 会真去连一次，连得通就拒绝选用本后端；只有死 socket 文件不算）
 #
 # 因此：能用 container 或 bwrap 时永远不要用它。dsh-sandbox.sh 的选择顺序
 # 已经保证了这一点。
@@ -39,15 +39,6 @@ osuser_for() { local n="dsh-$1"; echo "${n:0:31}"; }
 # 才能继续读写员工目录。不这么做，建号后文件服务器那一侧立刻全部 403。
 service_gid() { stat -c %g "$DSH_ROOT"; }
 
-docker_socket_reachable() {
-  local s
-  local dh="${DOCKER_HOST:-}"
-  for s in /var/run/docker.sock /run/docker.sock "${dh#unix://}"; do
-    [ -n "$s" ] && [ -S "$s" ] && return 0
-  done
-  return 1
-}
-
 have_dropper() {
   command -v setpriv >/dev/null 2>&1 || command -v runuser >/dev/null 2>&1
 }
@@ -63,12 +54,18 @@ backend_probe() {
   if ! have_dropper; then
     echo "NO_DROPPER"; log "缺 setpriv / runuser（apt-get install -y util-linux）"; return 1
   fi
-  if docker_socket_reachable; then
-    echo "DOCKER_SOCKET_PRESENT"
-    log "机器上有 docker socket。UID 隔离在它面前完全无效——"
+  if docker_socket_live; then
+    echo "DOCKER_SOCKET_LIVE"
+    log "机器上有【连得通】的 docker socket。UID 隔离在它面前完全无效——"
     log "  容器里的 shell 一句 'docker run -v /:/host ...' 就拿到整台宿主。"
     log "  这种环境请用 container 后端（它本来就更强），不要退到 uid。"
     return 1
+  fi
+  if docker_socket_file_exists; then
+    # 死 socket 不构成逃逸路径，但这是颗定时炸弹：哪天有人把 dockerd 起起来，
+    # 本档立刻失效。每次启动都会重新判一次，所以起了之后会被 run 那边拦住。
+    log "注意: 有 docker socket 文件但连不上守护进程，暂不构成逃逸路径。"
+    log "  一旦 dockerd 被启动，本档即刻失效——那时应改用 container 后端。"
   fi
   echo "OK root+useradd"
   return 0
@@ -174,8 +171,8 @@ backend_run() {
   local DSH_HOME_DIR="${3:?缺少 dsh_home}" WORKSPACE="${4:?缺少 workspace}"
 
   [ "$(id -u)" = "0" ] || die "本后端需要 root（调度器本应先 probe 过）"
-  if docker_socket_reachable; then
-    die "检测到 docker socket，UID 隔离在它面前无效，拒绝启动（请改用 container 后端）"
+  if docker_socket_live; then
+    die "检测到连得通的 docker socket，UID 隔离在它面前无效，拒绝启动（请改用 container 后端）"
   fi
   validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE"
 

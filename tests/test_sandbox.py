@@ -643,5 +643,65 @@ class ContainerPathMapTest(unittest.TestCase):
         self.assertNotEqual(res.returncode, 0, res.stdout)
 
 
+class DockerSocketLivenessTest(unittest.TestCase):
+    """区分「有 socket 文件」和「后面真有守护进程在听」。
+
+    现场撞见过：容器里装了 docker 包、留着一个 /var/run/docker.sock，但
+    dockerd 从来没起来过。那种死 socket 起不了任何容器，不是逃逸路径；
+    早先按「文件存在」判定，会把本来可用的 uid 档误判成不可用。
+    反过来，判不出来时必须当作可达——方向朝安全那边倒。
+    """
+
+    MAKE_STALE = (
+        "python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); "
+        "s.bind(sys.argv[1]); s.close()' {sock}"
+    )
+    MAKE_LISTENING = (
+        "python3 -c 'import socket,sys,os,time; s=socket.socket(socket.AF_UNIX); "
+        "s.bind(sys.argv[1]); s.listen(1); "
+        "os.fork() and os._exit(0); time.sleep(20)' {sock} ; sleep 1"
+    )
+
+    def _probe(self, sock_dir: str, make: str) -> tuple[int, int]:
+        """返回 (docker_socket_live 退出码, docker_socket_file_exists 退出码)。"""
+        sock = f"{sock_dir}/docker.sock"
+        script = "\n".join([
+            "set -uo pipefail",
+            "BACKEND_TAG=t",
+            f'. "{REPO}/dsh-runtime/backends/common.sh"',
+            # 覆盖候选列表，避免误连到开发机上真实的 docker socket
+            "docker_socket_candidates() { printf '%s\\n' " + f'"{sock}"' + "; }",
+            make.format(sock=f'"{sock}"'),
+            "docker_socket_live; live=$?",
+            "docker_socket_file_exists; exists=$?",
+            'echo "$live $exists"',
+        ])
+        res = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        parts = res.stdout.split()
+        if len(parts) != 2:
+            raise AssertionError(f"探针无输出: {res.stdout!r} {res.stderr!r}")
+        return int(parts[0]), int(parts[1])
+
+    def test_no_socket_at_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live, exists = self._probe(tmp, ":")
+        self.assertNotEqual(live, 0, "没有 socket 就不该判成可达")
+        self.assertNotEqual(exists, 0)
+
+    def test_stale_socket_file_is_not_reachable(self):
+        """没人在听的 socket：文件在但连不上，不算逃逸路径。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            live, exists = self._probe(tmp, self.MAKE_STALE)
+        self.assertNotEqual(live, 0, "死 socket 判成可达的话，uid 档会被误判为不可用")
+        self.assertEqual(exists, 0, "文件确实在，file_exists 要认出来以便告警")
+
+    def test_listening_socket_is_reachable(self):
+        """真有进程在 listen：必须判成可达，uid 档要因此拒绝选用自己。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            live, exists = self._probe(tmp, self.MAKE_LISTENING)
+        self.assertEqual(live, 0, "有人在 listen 就必须判成可达")
+        self.assertEqual(exists, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

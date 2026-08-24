@@ -67,6 +67,60 @@ sys.exit(0 if (int(sys.argv[1], 16) >> 21) & 1 else 1)
 PY
 }
 
+# ---------- docker socket 可达性 ----------
+# 「文件存在」不等于「能逃逸」：容器里常留着一个没有守护进程在听的死 socket
+# （装了 docker 包但 dockerd 没起、或宿主 socket 挂进来后对端已停）。
+# 死 socket 连不上任何守护进程，起不了兄弟容器，不构成逃逸路径。
+# 所以这里【真去连一次】，而不是看有没有那个文件——现场就撞见过这种情况，
+# 按文件存在判定会把本来可用的 uid 档误判成不可用。
+#
+# 判不出来的时候（既没有 python3 也没有 curl）一律当作「可达」，方向朝安全那边倒。
+docker_socket_candidates() {
+  local dh="${DOCKER_HOST:-}"
+  printf '%s\n' /var/run/docker.sock /run/docker.sock "${dh#unix://}"
+}
+
+_socket_answers() { # $1=socket 路径；能连上守护进程则 0
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(2)
+try:
+    s.connect(sys.argv[1])
+except OSError:
+    sys.exit(1)
+finally:
+    s.close()
+sys.exit(0)
+' "$1" 2>/dev/null
+    return $?
+  fi
+  if command -v curl >/dev/null 2>&1; then
+    curl -s --max-time 2 --unix-socket "$1" http://localhost/_ping >/dev/null 2>&1
+    return $?
+  fi
+  return 0   # 测不了就当作可达
+}
+
+docker_socket_live() {
+  local s
+  while read -r s; do
+    { [ -n "$s" ] && [ -S "$s" ]; } || continue
+    _socket_answers "$s" && return 0
+  done < <(docker_socket_candidates)
+  return 1
+}
+
+# 只有文件、后面没人听：不是逃逸路径，但哪天有人把 dockerd 起起来就是了
+docker_socket_file_exists() {
+  local s
+  while read -r s; do
+    { [ -n "$s" ] && [ -S "$s" ]; } && return 0
+  done < <(docker_socket_candidates)
+  return 1
+}
+
 # ---------- 挂载解析 ----------
 # 输出到全局：MOUNT_MODES[] / MOUNT_PATHS[] / ALLOWED_ROOTS（每行一条）
 parse_extra_mounts() { # $1=workspace(已 readlink)
