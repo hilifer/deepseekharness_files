@@ -14,10 +14,17 @@
 #   ✔ 员工之间读不到彼此的工作区、DSH_HOME（不同 UID + 0770 目录）
 #   ✔ 员工读不到 Authelia 用户库、TLS 私钥、FileBrowser 库、管理后台代码
 #   ✔ 实例改不了 node/dsh 本体与共享插件（只读位）
+#   ✔ 连不到同僚的实例端口与本机内部服务端口（netfilter 按 uid 匹配封锁）
+#
+# 【为什么必须有那条防火墙规则】DAC 只管文件。员工 A 的 shell 一句
+#   curl 127.0.0.1:<B 的端口>
+# 就能驱动 B 的 dsh，而那个进程以 B 的 uid 跑、读的是 B 的工作区——
+# 一个字节的文件权限都没违反，B 的数据照样出来了。前两档靠 netns、
+# landlock 档靠 TCP 端口白名单封这条路；本档只剩 netfilter 的 owner 匹配
+# 这一个强制点，所以它是【probe 的硬前提】，拿不到就不选本档。
 #
 # 它【给不到】什么——这些必须如实写出来，不能让人误以为等价于前两档：
 #   ✘ 无独立 pid ns：`ps` 能看到全机进程，能看到别人的命令行参数
-#   ✘ 无独立 net ns：员工 A 能直连员工 B 的 dsh 端口驱动其 agent
 #   ✘ /tmp 共享：只能靠粘滞位，不能防同名占坑
 #   ✘ 一旦出现任何 setuid 提权点或【连得通】的 docker socket，整层就作废
 #     （probe 会真去连一次，连得通就拒绝选用本后端；只有死 socket 文件不算）
@@ -43,6 +50,69 @@ have_dropper() {
   command -v setpriv >/dev/null 2>&1 || command -v runuser >/dev/null 2>&1
 }
 
+# ---------- 同僚端口封锁（本档唯一的网络强制点）----------
+# 用 netfilter 的 owner 匹配：按【发起连接的 uid】拦截。这正好贴合本档的
+# 隔离模型——每个员工一个 uid，规则也就一人一条链。
+#   · nginx / FileBrowser / 管理后台以服务账号跑，不在任何一条规则里，不受影响
+#   · 实例自己那个端口放行（RETURN），别的实例端口与内部服务端口一律 REJECT
+#   · 入站不受影响：nginx 反代打进来的是 INPUT，规则只挂在 OUTPUT
+fw_chain_for() { echo "DSH-ISO-$1"; }
+
+# 本机可用的 iptables 变体。装了不等于能用（容器里常常没有 CAP_NET_ADMIN、
+# 或者 xt_owner 模块加载不了），所以每个变体都真去列一次表。
+fw_variants() {
+  local c
+  for c in iptables ip6tables; do
+    command -v "$c" >/dev/null 2>&1 && "$c" -w 5 -S OUTPUT >/dev/null 2>&1 && echo "$c"
+  done
+}
+
+# 真往 OUTPUT 里插一条 owner 规则再删掉——只判命令存在会漏掉最常见的两种
+# 失败：没有 CAP_NET_ADMIN、内核没有 xt_owner。
+fw_available() {
+  local ipt; ipt=$(fw_variants | head -1)
+  [ -n "$ipt" ] || return 1
+  "$ipt" -w 5 -I OUTPUT 1 -p tcp --dport 65534 -m owner --uid-owner 0 -j RETURN 2>/dev/null || return 1
+  "$ipt" -w 5 -D OUTPUT -p tcp --dport 65534 -m owner --uid-owner 0 -j RETURN 2>/dev/null
+  return 0
+}
+
+fw_seal_peer_ports() { # $1=uid $2=本人端口
+  local uid=$1 own=$2 chain ipt p
+  chain=$(fw_chain_for "$uid")
+  for ipt in $(fw_variants); do
+    "$ipt" -w 5 -N "$chain" 2>/dev/null || true
+    "$ipt" -w 5 -F "$chain" || die "清空链 $chain 失败（$ipt）"
+    "$ipt" -w 5 -A "$chain" -p tcp --dport "$own" -j RETURN \
+      || die "写入放行本人端口的规则失败（$ipt）"
+    "$ipt" -w 5 -A "$chain" -p tcp --dport "$DSH_PORT_RANGE" -j REJECT --reject-with tcp-reset \
+      || die "写入封锁实例端口段 $DSH_PORT_RANGE 的规则失败（$ipt）"
+    for p in $DSH_INTERNAL_PORTS; do
+      "$ipt" -w 5 -A "$chain" -p tcp --dport "$p" -j REJECT --reject-with tcp-reset \
+        || die "写入封锁内部服务端口 $p 的规则失败（$ipt）"
+    done
+    # 挂到 OUTPUT 最前面，幂等
+    "$ipt" -w 5 -C OUTPUT -m owner --uid-owner "$uid" -j "$chain" 2>/dev/null \
+      || "$ipt" -w 5 -I OUTPUT 1 -m owner --uid-owner "$uid" -j "$chain" \
+      || die "把 $chain 挂进 OUTPUT 失败（$ipt）"
+  done
+}
+
+# 装完再回内核里确认一次。规则不在就【不启动】——本档没有别的手段封这条路，
+# 带着漏洞起来等于把「个体不能访问其他空间的数据」这条要求废掉。
+fw_assert_sealed() { # $1=uid
+  local chain ipt n=0
+  chain=$(fw_chain_for "$1")
+  for ipt in $(fw_variants); do
+    "$ipt" -w 5 -C OUTPUT -m owner --uid-owner "$1" -j "$chain" 2>/dev/null \
+      || die "OUTPUT 里找不到 uid=$1 的封锁规则（$ipt），拒绝启动。
+       本档靠它挡住「员工 A 直连员工 B 的实例端口驱动其 agent」，
+       没有它，DAC 再严也拦不住 B 的数据被读走。"
+    n=$((n+1))
+  done
+  [ "$n" -gt 0 ] || die "一个 iptables 变体都用不了，拒绝启动（本档需要 CAP_NET_ADMIN + xt_owner）"
+}
+
 # ---------- probe ----------
 backend_probe() {
   if [ "$(id -u)" != "0" ]; then
@@ -53,6 +123,14 @@ backend_probe() {
   fi
   if ! have_dropper; then
     echo "NO_DROPPER"; log "缺 setpriv / runuser（apt-get install -y util-linux）"; return 1
+  fi
+  if ! fw_available; then
+    echo "NO_NETFILTER"
+    log "拿不到 netfilter 的 owner 匹配（缺 iptables、缺 CAP_NET_ADMIN、或内核无 xt_owner）。"
+    log "  本档没有别的手段封「员工 A 直连员工 B 的实例端口」这条路——那条路不经过"
+    log "  文件系统，DAC 一点忙都帮不上：A 驱动 B 的 agent，读出来的就是 B 的工作区。"
+    log "  处理: 容器加 --cap-add NET_ADMIN 并安装 iptables；或改用 container / landlock 档。"
+    return 1
   fi
   if docker_socket_live; then
     echo "DOCKER_SOCKET_LIVE"
@@ -67,7 +145,7 @@ backend_probe() {
     log "注意: 有 docker socket 文件但连不上守护进程，暂不构成逃逸路径。"
     log "  一旦 dockerd 被启动，本档即刻失效——那时应改用 container 后端。"
   fi
-  echo "OK root+useradd"
+  echo "OK root+useradd+netfilter"
   return 0
 }
 
@@ -200,6 +278,10 @@ backend_run() {
   # 供 FileBrowser 继续读写；员工本人走属主位，不需要那个组。
   local uid gid
   uid=$(id -u "$osuser"); gid=$(id -g "$osuser")
+
+  # 网络强制点：封掉同僚实例端口与内部服务端口，只放行本人那个端口
+  fw_seal_peer_ports "$uid" "$PORT"
+  fw_assert_sealed "$uid"
 
   cd "$WORKSPACE"
   log "启动 $USERNAME: port=$PORT ws=$WORKSPACE (os 用户 $osuser/$uid, DAC 隔离)"

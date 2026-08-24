@@ -386,7 +386,10 @@ jobs:
             isolation: 'bwrap uid none'
           - shape: 容器·root·无命名空间·无docker
             expect: uid
-            args: ''
+            # --cap-add NET_ADMIN：uid 档要靠 netfilter 的 owner 匹配封住
+            # 「A 直连 B 的实例端口」，没有这个能力它就拒绝被选中（fail-closed）。
+            # 这不是为了让 CI 好过，而是这一档在真实部署里本来就需要它。
+            args: '--cap-add NET_ADMIN'
             nonroot: 'no'
             block_userns: '1'
             need_image: 'no'
@@ -442,6 +445,19 @@ jobs:
             echo "（本 runner 没有这个开关）"
           fi
 
+      - name: 打开 yama ptrace_scope（landlock 档的硬前提）
+        # landlock 档所有实例同 uid，scope=0 时同僚之间可 ptrace 互相劫持读走
+        # 对方工作区，所以本档要求 scope>=1。yama 是宿主全局 sysctl（非命名空间），
+        # 容器共享宿主的值——在 runner 上设一次，容器里就是 1。这也正是真实部署
+        # 里我们要运维做的那一行。GH runner 默认可能是 0，这里显式设成 1。
+        run: |
+          if [ -e /proc/sys/kernel/yama/ptrace_scope ]; then
+            sudo sysctl -w kernel.yama.ptrace_scope=1
+            cat /proc/sys/kernel/yama/ptrace_scope
+          else
+            echo "（本 runner 没编 yama —— landlock 形状会因此 probe 失败，符合 fail-closed 预期）"
+          fi
+
       - name: 造一个带依赖的形状基础镜像
         # 形状容器要以非 root 跑（那才是真实部署的样子），非 root 装不了包，
         # 所以依赖预先烤进镜像。
@@ -449,7 +465,7 @@ jobs:
           cat > "$RUNNER_TEMP/Dockerfile.shape" <<'DOCKERFILE'
           FROM ubuntu:24.04
           RUN apt-get update && apt-get install -y --no-install-recommends \
-                bash python3 bubblewrap socat curl iproute2 acl \
+                bash python3 bubblewrap socat curl iproute2 acl iptables \
                 passwd util-linux findutils coreutils ca-certificates \
            && rm -rf /var/lib/apt/lists/*
           DOCKERFILE

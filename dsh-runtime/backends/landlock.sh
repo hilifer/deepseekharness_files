@@ -24,6 +24,17 @@
 #   ✘ 越界是 EACCES「拒绝访问」不是 ENOENT「不存在」，路径存在性仍会泄露
 #   ✘ 没有 pid namespace：`ps` 看得到全机进程和它们的命令行
 #   ✘ 没有 cgroup 资源限额
+#   ✘ 【同 uid 命门】本档所有实例都以同一个 OS 用户跑（没有 root 就 useradd
+#      不了）。同 uid 之间：
+#        · /proc/<别人 pid>/environ、cmdline 读得到（Landlock 不管 /proc 内层
+#          文件的属主判定）——环境里若经 DSH_SANDBOX_PASSENV 塞了密钥就会外泄；
+#        · 若内核的 yama ptrace_scope=0，A 能 PTRACE_ATTACH 到 B 的实例，
+#          借 B 的进程（带着 B 的 Landlock 规则）读出 B 的整个工作区——
+#          这会【直接击穿「个体不能访问其他空间的数据」】。
+#      所以本档把 yama ptrace_scope>=1 列为【硬前提】：拿不到就 probe 失败，
+#      让调度器往下退档而不是揣着这个洞裸奔（fail-closed）。
+#      环境里不放密钥、且 ptrace 被 yama 挡住时，剩下的只是路径元数据泄露
+#      （路径能不能打开仍由 Landlock 说了算，数据本身进不去）。
 # 强在哪：**不需要 root、不需要 userns、不需要任何人配合**，装上就能用。
 # =====================================================================
 set -euo pipefail
@@ -39,6 +50,20 @@ LANDLOCK_EXEC="$DSH_ROOT/dsh-runtime/dsh-landlock-exec.py"
 DSH_LANDLOCK_CONNECT_PORTS="${DSH_LANDLOCK_CONNECT_PORTS:-443 80 22}"
 
 python_bin() { command -v python3 2>/dev/null || true; }
+
+# 允许显式放行 ptrace 命门（危险，只在「同机只有一个员工」或你另有 MAC 兜底时用）
+DSH_LANDLOCK_ALLOW_PTRACE="${DSH_LANDLOCK_ALLOW_PTRACE:-0}"
+
+# yama ptrace_scope：本档所有实例同 uid，scope=0 时同僚之间可 PTRACE_ATTACH 互相
+# 劫持，借对方进程读走对方工作区。>=1 才挡得住。文件不存在（没编 yama）当作 0。
+ptrace_scope_value() {
+  local f=/proc/sys/kernel/yama/ptrace_scope
+  [ -r "$f" ] && cat "$f" 2>/dev/null || echo 0
+}
+ptrace_hardened() {
+  [ "$DSH_LANDLOCK_ALLOW_PTRACE" = "1" ] && return 0
+  [ "$(ptrace_scope_value)" -ge 1 ] 2>/dev/null
+}
 
 # ---------- probe ----------
 backend_probe() {
@@ -58,7 +83,18 @@ backend_probe() {
     log "内核不支持 Landlock，或上锁后并未真正生效"
     return 1
   fi
-  echo "OK $(printf '%s' "$out" | head -1)"
+  if ! ptrace_hardened; then
+    echo "PTRACE_OPEN"
+    log "内核 yama ptrace_scope=$(ptrace_scope_value)（本档所有实例同 uid）。"
+    log "  同 uid 之间可 PTRACE_ATTACH 劫持对方的实例进程，借它读走对方工作区——"
+    log "  这会直接击穿「个体不能访问其他空间的数据」。Landlock 管不了 ptrace。"
+    log "  处理，任选其一："
+    log "    a) 宿主开启 yama:  sysctl -w kernel.yama.ptrace_scope=1（或写进 sysctl.d）"
+    log "    b) 换 container / bwrap / uid 档（各自有 pid ns 或独立 uid，天然免疫）"
+    log "    c) 确认同机只会有一个员工，再 DSH_LANDLOCK_ALLOW_PTRACE=1 显式放行"
+    return 1
+  fi
+  echo "OK $(printf '%s' "$out" | head -1) yama=$(ptrace_scope_value)"
   return 0
 }
 
@@ -71,6 +107,16 @@ backend_run() {
   [ -n "$py" ] || die "缺 python3（调度器本应先 probe 过）"
   [ -r "$LANDLOCK_EXEC" ] || die "找不到上锁器: $LANDLOCK_EXEC"
   validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE"
+  if ! ptrace_hardened; then
+    die "yama ptrace_scope=$(ptrace_scope_value)，同 uid 实例之间可互相 ptrace 劫持读走对方工作区，拒绝启动。
+       处理: sysctl -w kernel.yama.ptrace_scope=1；或换 container/bwrap/uid 档；
+       或（仅当同机只有一个员工）DSH_LANDLOCK_ALLOW_PTRACE=1 放行。"
+  fi
+  # 环境里若带了密钥（PASSENV），同 uid 同僚能从 /proc/<pid>/environ 读到——提醒一次
+  if [ -n "$DSH_SANDBOX_PASSENV" ]; then
+    log "注意: DSH_SANDBOX_PASSENV 非空，其值会进 environ；本档同 uid 同僚可经 /proc 读到。"
+    log "  密钥类务必改为落在本人 DSH_HOME 下的文件（Landlock 已把同僚挡在其外），勿走环境变量。"
+  fi
 
   WORKSPACE=$(readlink -f "$WORKSPACE")
   DSH_HOME_DIR=$(readlink -f "$DSH_HOME_DIR")

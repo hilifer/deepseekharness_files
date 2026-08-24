@@ -146,7 +146,15 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_static(self, path: str):
         rel = "index.html" if path in ("/admin", "/admin/index.html") else path[len("/admin/"):]
         target = (STATIC / rel).resolve()
-        if not str(target).startswith(str(STATIC.resolve())) or not target.is_file():
+        # 用 relative_to 判「真在 STATIC 之内」——startswith 会把 /x/static-evil
+        # 误判成 /x/static 的子路径,是个经典越界口子。
+        root = STATIC.resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
+        if not target.is_file():
             self._send(404, b"not found", "text/plain; charset=utf-8")
             return
         ctype = {"html": "text/html; charset=utf-8", "js": "application/javascript; charset=utf-8",

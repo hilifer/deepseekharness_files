@@ -16,6 +16,11 @@ SHARED_PROFILES="${DSH_SHARED_PROFILES:-$DSH_ROOT/.local/share/dsh/profiles}"
 # dsh 的 Host 校验一律拒绝。现场实测已确认 dsh 接受重复的 --trusted-host。
 DSH_TRUSTED_HOSTS="${DSH_TRUSTED_HOSTS:-218.17.143.249:8099 192.168.1.225:8099 127.0.0.1:8099}"
 
+# 实例端口段与本机内部服务端口。uid 档要靠它们做网络封锁：
+# 「A 直连 B 的实例端口驱动 B 的 agent」这条路不经过文件系统，DAC 拦不住。
+DSH_PORT_RANGE="${DSH_PORT_RANGE:-13100:13199}"
+DSH_INTERNAL_PORTS="${DSH_INTERNAL_PORTS:-18080 19091 19200}"
+
 # 允许透传进实例的环境变量名（dsh 的模型 API Key 之类放这里）
 DSH_SANDBOX_PASSENV="${DSH_SANDBOX_PASSENV:-}"
 

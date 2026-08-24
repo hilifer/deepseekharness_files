@@ -97,10 +97,26 @@ userns 通不通、有没有 CAP_SYS_ADMIN、Landlock ABI 多少、docker 够不
 | 独立 pid ns（ps 看不到别人） | ✔ | ✔ | ✘ | ✘ | ✘ |
 | 连不到别人的实例端口 | ✔ netns | 需 `DSH_NETNS=1` | ✔ TCP 端口白名单（ABI v4+） | ✘ | ✘ |
 | kill 不到别人的进程 | ✔ | ✔ | ✔ scope（ABI v6+） | ✘ | ✘ |
+| 读不到别人进程的 environ/内存 | ✔ pid ns | ✔ pid ns | △ 需 yama≥1（同 uid） | ✔ 异 uid | ✘ |
 | 资源限额（内存/CPU/进程数） | ✔ | ✘ | ✘ | ✘ | ✘ |
 | docker socket 逃逸 | ✔ 不挂进去 | ✔ 不挂 `/var` | ✔ 不放行 `/var` | ✘ **一票否决** | ✘ |
 | 主管的部门级权限 | ✔ 多挂一个卷 | ✔ 多挂一个 bind | ✔ 多加一条规则 | 需文件系统支持 ACL | — |
 | 前提 | 够得到 dockerd | userns 或 root+CAP_SYS_ADMIN | **内核 5.13+，仅此而已** | 容器内 root 且无 docker socket | 显式放行 |
+
+`landlock` 档有一处必须讲清的命门：它不需要 root，代价是【所有实例同一个 OS
+用户】。同 uid 之间，Landlock 管得了文件路径，管不了 `/proc/<别人 pid>` 与
+ptrace——
+
+- `/proc/<peer>/environ`、`cmdline` 同 uid 就读得到。所以本档【环境里绝不放密钥】：
+  `build_instance_env` 用 `env -i` 重建环境，密钥类应落在本人 DSH_HOME 下的文件里
+  （Landlock 已把同僚挡在其外）。DSH_SANDBOX_PASSENV 若非空，run 时会告警。
+- 若内核 `yama ptrace_scope=0`，员工 A 能 PTRACE_ATTACH 到 B 的实例，借 B 的进程
+  （带着 B 的 Landlock 规则）读走 B 的整个工作区——直接击穿本项目的硬要求。
+  因此 `backends/landlock.sh` 把 `ptrace_scope>=1` 列为【probe 硬前提】：拿不到就
+  probe 失败，调度器往下退档，而不是揣着这个洞裸奔。`sysctl -w
+  kernel.yama.ptrace_scope=1` 一行即可（Ubuntu 默认就是 1）；确认同机只有一个员工
+  时可 `DSH_LANDLOCK_ALLOW_PTRACE=1` 显式放行。container / bwrap 有 pid ns、uid 档
+  异 uid，三者天然免疫，不受此限。
 
 `uid` 档那一行的 ✘ 是决定性的：容器里有 docker socket、员工的 dsh 又有 shell，
 够得到就是一句话逃逸——

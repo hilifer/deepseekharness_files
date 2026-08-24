@@ -703,5 +703,119 @@ class DockerSocketLivenessTest(unittest.TestCase):
         self.assertEqual(exists, 0)
 
 
+class AutoOrderTest(unittest.TestCase):
+    """择优顺序本身就是策略，必须钉住：弱档绝不能排在强档前面。
+
+    以前只有「有 bwrap 时别退到 uid」一条行为断言，而它要跑起来得先有 bwrap；
+    顺序表本身没人看着。landlock 比 uid 强（内核强制 vs 只有 DAC，且
+    landlock 不需要 root），排反了在现场就是实打实的降级。"""
+
+    def _order(self) -> list:
+        line = next(l for l in (REPO / "dsh-runtime" / "dsh-sandbox.sh")
+                    .read_text(encoding="utf-8").splitlines()
+                    if l.startswith("AUTO_ORDER="))
+        return line.split("=", 1)[1].strip().strip('"').split()
+
+    def test_order_is_strongest_first(self):
+        self.assertEqual(self._order(), ["container", "bwrap", "landlock", "uid", "none"])
+
+    def test_landlock_before_uid(self):
+        o = self._order()
+        self.assertLess(o.index("landlock"), o.index("uid"),
+                        "landlock 不需要 root、且是内核强制，绝不能排在 uid 之后")
+
+    def test_none_is_last(self):
+        self.assertEqual(self._order()[-1], "none", "无隔离档必须垫底")
+
+
+class UidFirewallRulesTest(unittest.TestCase):
+    """uid 档的同僚端口封锁：DAC 只管文件，这条路不经过文件系统。
+
+    员工 A 一句 `curl 127.0.0.1:<B 的端口>` 就能驱动 B 的 agent 读 B 的工作区，
+    文件权限一个字节都没违反。本档只剩 netfilter 的 owner 匹配能封它，
+    所以规则组成必须有回归——不需要 root：用桩 iptables 把参数录下来看。
+    """
+
+    UID = "4242"
+    OWN_PORT = "13107"
+
+    # 只把「同僚端口封锁」那一段函数抠出来 eval，绕开 uid.sh 末尾的 case 分发
+    EXTRACT = ("eval \"$(sed -n '/同僚端口封锁/,/---------- probe ----------/p' "
+               "\"{repo}/dsh-runtime/backends/uid.sh\")\"")
+
+    def _run(self, stub_body: str, tail: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "bin"
+            stub.mkdir()
+            log = Path(tmp) / "calls.log"
+            (stub / "iptables").write_text(stub_body.replace("{log}", str(log)), encoding="utf-8")
+            (stub / "iptables").chmod(0o755)
+            script = "\n".join([
+                "set -euo pipefail",
+                'export PATH="%s:$PATH"' % stub,
+                "export DSH_ROOT=%s" % tmp,
+                "BACKEND_TAG=t",
+                '. "%s/dsh-runtime/backends/common.sh"' % REPO,
+                self.EXTRACT.format(repo=REPO),
+                tail,
+            ])
+            res = subprocess.run(["bash", "-c", script], capture_output=True,
+                                 text=True, timeout=60)
+            calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+            return res, calls
+
+    # 桩要有状态，否则测不出「装之前查不到、装之后查得到」这层语义：
+    #   -C 在 -I 之前失败（逼出插入分支），-I 之后成功（fw_assert_sealed 才有意义）
+    STUB_OK = ('#!/bin/bash\n'
+               'printf "%s\\n" "$*" >> "{log}"\n'
+               'M="{log}.installed"\n'
+               'for a in "$@"; do [ "$a" = "-I" ] && { touch "$M"; exit 0; }; done\n'
+               'for a in "$@"; do [ "$a" = "-C" ] && { [ -e "$M" ] && exit 0 || exit 1; }; done\n'
+               'exit 0\n')
+
+    def _rules(self) -> list:
+        res, calls = self._run(self.STUB_OK,
+                               "fw_seal_peer_ports %s %s\nfw_assert_sealed %s"
+                               % (self.UID, self.OWN_PORT, self.UID))
+        self.assertEqual(res.returncode, 0, res.stderr[-800:])
+        return calls
+
+    def test_peer_instance_ports_are_rejected(self):
+        rules = self._rules()
+        self.assertTrue(any("13100:13199" in r and "REJECT" in r for r in rules),
+                        "实例端口段没被封: %s" % rules)
+
+    def test_own_port_is_returned_before_the_range(self):
+        """放行本人端口的规则必须排在封锁段之前，否则自己也被挡住。"""
+        rules = self._rules()
+        own = next(i for i, r in enumerate(rules)
+                   if "--dport %s -j RETURN" % self.OWN_PORT in r)
+        rng = next(i for i, r in enumerate(rules) if "13100:13199" in r)
+        self.assertLess(own, rng, "顺序反了，本人端口会被自己的规则挡住: %s" % rules)
+
+    def test_internal_service_ports_are_rejected(self):
+        """FileBrowser / Authelia / 管理后台：绕过 nginx 直连也要挡住。"""
+        rules = self._rules()
+        for port in ("18080", "19091", "19200"):
+            self.assertTrue(any("--dport %s" % port in r and "REJECT" in r for r in rules),
+                            "内部服务端口 %s 没封: %s" % (port, rules))
+
+    def test_chain_is_hooked_into_output_by_uid(self):
+        rules = self._rules()
+        self.assertTrue(any("-I OUTPUT 1" in r and "--uid-owner %s" % self.UID in r
+                            and "DSH-ISO-%s" % self.UID in r for r in rules),
+                        "链没挂进 OUTPUT: %s" % rules)
+
+    def test_missing_rule_refuses_to_start(self):
+        """规则不在内核里就必须拒绝启动——本档没有第二个手段封这条路。"""
+        stub = ('#!/bin/bash\n'
+                'printf "%s\\n" "$*" >> "{log}"\n'
+                'for a in "$@"; do [ "$a" = "-S" ] && exit 0; done\n'
+                'exit 1\n')
+        res, _ = self._run(stub, "fw_assert_sealed %s" % self.UID)
+        self.assertNotEqual(res.returncode, 0, "规则不在却放行了启动")
+        self.assertIn("拒绝启动", res.stderr, res.stderr[-500:])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

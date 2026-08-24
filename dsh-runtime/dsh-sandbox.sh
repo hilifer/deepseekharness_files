@@ -111,6 +111,8 @@ env_report() {
   else
     item "Landlock" "不支持（需要内核 5.13+ 且 landlock 在 LSM 列表里）"
   fi
+  local ys=/proc/sys/kernel/yama/ptrace_scope
+  item "yama ptrace_scope" "$([ -r "$ys" ] && cat "$ys" || echo "0（未编 yama）") —— landlock 档要求 >=1（同 uid 实例防互相 ptrace 劫持）"
   if command -v docker >/dev/null 2>&1; then
     if docker info >/dev/null 2>&1; then
       item "docker" "客户端在，守护进程可达"

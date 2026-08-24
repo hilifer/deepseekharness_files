@@ -258,7 +258,14 @@ backend_run() {
   build_trusted_host_args
 
   if [ "$DSH_NETNS" != "1" ]; then
+    # 文件维度 bwrap 靠 mount+pid ns 已经隔死；但默认共享宿主网络，
+    # 同僚的实例端口(127.0.0.1:1310x)在同一个 net ns 里连得到——员工 A 一句
+    # curl 就能驱动 B 的 agent 读 B 的工作区，这条路不经过文件系统。
+    # bwrap 是同 uid,netfilter owner 匹配区分不了同僚,唯一的封法是独立 netns。
     log "启动 $USERNAME: port=$PORT ws=$WORKSPACE (bwrap=$BWRAP/$BWRAP_MODE, 共享网络)"
+    log "⚠ 共享网络档:同僚实例端口可直连,可被用来驱动他人的 agent 读其工作区。"
+    log "  要封死这条路,开 DSH_NETNS=1(每实例独立 netns,需 passt+socat);"
+    log "  或改用 container / landlock 档(前者独立 netns,后者 TCP 端口白名单)。"
     exec "$BWRAP" "${args[@]}" -- \
       "$NODE_BIN" "$DSH_BIN" web --port "$PORT" "${HOST_ARGS[@]}"
   fi

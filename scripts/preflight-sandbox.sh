@@ -105,6 +105,37 @@ if reg.exists():
 PY
 )
 
+# 「同僚端口连不上」这一项，必须确认是【被挡住】而不是【那边根本没人听】。
+# 早先只要没起第二个实例，这项就恒绿——一条没验过的路披着通过的皮，
+# 比红着更危险。所以这里在没人监听时自己起一个桩监听器，再去连。
+PEER_STUB_PID=""
+if [ -n "$PEER_PORT" ]; then
+  if ! curl -s --max-time 2 -o /dev/null "http://127.0.0.1:$PEER_PORT/" 2>/dev/null; then
+    python3 - "$PEER_PORT" >/dev/null 2>&1 <<'PY_STUB' &
+import socket, sys, time
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    srv.bind(("127.0.0.1", int(sys.argv[1]))); srv.listen(8)
+except OSError:
+    sys.exit(0)
+end = time.time() + 60
+srv.settimeout(1)
+while time.time() < end:
+    try:
+        c, _ = srv.accept()
+    except OSError:
+        continue
+    c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+    c.close()
+PY_STUB
+    PEER_STUB_PID=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      curl -s --max-time 1 -o /dev/null "http://127.0.0.1:$PEER_PORT/" 2>/dev/null && break
+      sleep 0.3
+    done
+  fi
+fi
+
 # stderr 留档而不是丢掉：探针一个字都没输出时，真正的原因全在 stderr 里。
 # 早先这里直接 2>/dev/null，实例根本没起来也只会表现成「16 项全红」，
 # 让人以为隔离失效，其实是启动失败——两种情况的处置完全不同。
@@ -115,6 +146,7 @@ RES=$(DSH_ROOT="$DSH_ROOT" DSH_NODE_BIN=/bin/bash DSH_BIN="$HOME_DIR/.preflight-
       P_PEER_PORT="$PEER_PORT" \
       "$SANDBOX" "$USERNAME" 13999 "$HOME_DIR" "$WS" 2>"$PROBE_ERR")
 rm -f "$HOME_DIR/.preflight-probe.sh" "$CANARY"
+[ -n "$PEER_STUB_PID" ] && kill "$PEER_STUB_PID" 2>/dev/null
 
 if ! printf '%s' "$RES" | grep -q '='; then
   echo
@@ -182,6 +214,15 @@ if [ "$BACKEND" = "container" ]; then
 elif [ "$BACKEND" = "landlock" ]; then
   info "网络隔离" "Landlock TCP 端口限制：只允许监听本人端口 + 外连白名单端口"
   info "" "别人的实例端口不在白名单里，「驱动同事的 agent」这条路已封（需 ABI v4+）"
+elif [ "$BACKEND" = "uid" ]; then
+  info "网络隔离" "netfilter owner 匹配：按员工 uid 封掉同僚实例端口与内部服务端口"
+  if command -v iptables >/dev/null 2>&1; then
+    N=$(iptables -S OUTPUT 2>/dev/null | grep -c -- '-j DSH-ISO-' || true)
+    [ "${N:-0}" -gt 0 ] && ok "OUTPUT 里有 $N 条 uid 封锁规则" \
+                        || bad "OUTPUT 里一条 uid 封锁规则都没有" "同僚端口没封住"
+  else
+    bad "本机没有 iptables" "uid 档封不住同僚端口，本不该被选中"
+  fi
 elif [ "${DSH_NETNS:-0}" = "1" ]; then
   info "网络隔离模式" "已启用（每实例独立 netns，入站走 unix socket）"
   if command -v pasta >/dev/null 2>&1 && command -v socat >/dev/null 2>&1; then
@@ -200,22 +241,24 @@ FB=$(g FBAPI)
 case "$FB" in
   401|403) ok "FileBrowser API 伪造 admin" "被拒 (HTTP $FB) —— 密钥头已生效" ;;
   200)     bad "FileBrowser API 伪造 admin" "HTTP 200，可读写全公司文件！请跑 scripts/init-secrets.sh 并重启 FileBrowser" ;;
-  000)     info "FileBrowser API" "未连通（服务没起？）" ;;
+  000)     info "FileBrowser API" "连不上（服务没起，或已被 uid 档的 netfilter 规则挡住）" ;;
   *)       info "FileBrowser API" "HTTP $FB" ;;
 esac
 AD=$(g ADMAPI)
 case "$AD" in
   403) ok "管理后台 API 伪造 admin" "被拒 (HTTP 403) —— token 已生效" ;;
   200) bad "管理后台 API 伪造 admin" "HTTP 200，可任意增删员工！检查 nginx generated/admin-token.conf" ;;
-  000) info "管理后台 API" "未连通（服务没起？）" ;;
+  000) info "管理后台 API" "连不上（服务没起，或已被 uid 档的 netfilter 规则挡住）" ;;
   *)   info "管理后台 API" "HTTP $AD" ;;
 esac
 PD=$(g PEERDSH)
+PEER_SRC=$([ -n "$PEER_STUB_PID" ] && echo "桩监听器" || echo "真实例")
 case "$PD" in
-  none) info "其他员工的 dsh 实例" "（没有第二个实例，跳过）" ;;
-  000)  ok "其他员工的 dsh 实例" "不可达" ;;
+  none) info "其他员工的 dsh 实例" "（登记表里没有第二个员工，无端口可测）" ;;
+  000)  ok "其他员工的 dsh 实例" "端口 $PEER_PORT 上有人监听（$PEER_SRC），仍连不上 —— 确实被挡住了" ;;
   *)    bad "其他员工的 dsh 实例" "HTTP $PD 可达 —— 可驱动他人的 agent 读写其工作区。
-       修复：换 container 后端（天然独立 netns），或在 bwrap 后端上开 DSH_NETNS=1" ;;
+       这条路不经过文件系统，DAC 拦不住：修复要么换 container 后端（天然独立 netns），
+       要么 bwrap 后端开 DSH_NETNS=1，要么走 landlock / uid 档（端口白名单 / netfilter）" ;;
 esac
 
 echo
