@@ -21,8 +21,9 @@
 #   sibling（挂宿主 socket，最常见）：起出来的是宿主的兄弟容器，-v 左边必须写
 #     【宿主上的绝对路径】，写当前容器内的路径会挂空目录——比起不来更难查。
 #   DinD（容器内自己的 dockerd）：路径就是当前容器内的路径，不用换算。
-# 本脚本不靠猜：先自省本容器的 Mounts 建出映射表，再【真起一个探针容器去看
-# 标记文件在不在】。验不过就 probe 失败，绝不带着错误的映射去启动实例。
+# 本脚本不靠猜：把几种可能的换算方式各试一遍（运维显式给的 > 自省本容器
+# Mounts > 恒等映射），每一种都【真起一个探针容器去看标记文件在不在】，
+# 第一个实测通过的才采用。全都不通过就 probe 失败，绝不带着错误的映射启动。
 # =====================================================================
 set -euo pipefail
 
@@ -68,25 +69,17 @@ own_container_id() {
 
 # PATHMAP[] 每项 "容器内路径|宿主路径"
 PATHMAP=()
-build_pathmap() {
-  PATHMAP=()
-  if [ -n "${DSH_HOST_ROOT:-}" ]; then
-    # 运维显式给了换算基准，最可靠，优先用
-    PATHMAP+=("$DSH_ROOT|$DSH_HOST_ROOT")
-    return 0
-  fi
-  if ! in_container; then
-    # 我们自己就跑在宿主上（或 DinD 场景下路径同构），恒等映射
-    PATHMAP+=("/|/")
-    return 0
-  fi
-  local cid line
+
+# 候选映射来源之一：自省本容器的 Mounts（挂了宿主 socket 的兄弟模式）
+introspected_map() {
+  local cid line n=0
   cid=$(own_container_id) || return 1
   while read -r line; do
-    [ -n "$line" ] && PATHMAP+=("$line")
+    [ -n "$line" ] || continue
+    echo "$line"; n=$((n + 1))
   done < <("$DOCKER_BIN" inspect "$cid" \
              --format '{{range .Mounts}}{{.Destination}}|{{.Source}}{{"\n"}}{{end}}' 2>/dev/null || true)
-  [ ${#PATHMAP[@]} -gt 0 ]
+  [ "$n" -gt 0 ]
 }
 
 # 取最长匹配前缀做换算；匹配不上就失败（绝不悄悄回落成恒等映射）
@@ -104,31 +97,82 @@ to_host_path() { # $1=容器内绝对路径
   echo "${src%/}$rest"
 }
 
-pathmap_fingerprint() { printf '%s\n' "$DSH_IMAGE" "${PATHMAP[@]}" | cksum | tr -d ' \n'; }
-
-# 不靠猜：真起一个容器，看挂进去的目录里有没有那个标记文件。
-verify_pathmap() {
-  local fp; fp=$(pathmap_fingerprint)
-  if [ -r "$PATHMAP_CACHE" ] && [ "$(cat "$PATHMAP_CACHE")" = "$fp" ]; then
-    return 0
-  fi
-  local hp marker
-  hp=$(to_host_path "$DSH_ROOT") || { log "路径映射覆盖不到 $DSH_ROOT"; return 1; }
+# 当前 PATHMAP 对不对？真起一个容器去看标记文件在不在——这是唯一可信的判据。
+probe_map() {
+  local hp marker rc=0
+  hp=$(to_host_path "$DSH_ROOT") || return 1
   marker=".pathmap-probe.$$"
-  : > "$DSH_ROOT/$marker"
-  local rc=0
+  : > "$DSH_ROOT/$marker" 2>/dev/null || { log "$DSH_ROOT 不可写，无法校验路径映射"; return 1; }
   "$DOCKER_BIN" run --rm --network none --entrypoint /bin/sh \
       -v "$hp:/probe:ro" "$DSH_IMAGE" -c "test -e /probe/$marker" >/dev/null 2>&1 || rc=$?
   rm -f "$DSH_ROOT/$marker"
-  if [ "$rc" != 0 ]; then
-    log "路径映射校验失败: 把 $DSH_ROOT 当作宿主上的 $hp 挂进容器，里面看不到标记文件。"
-    log "  当前映射表:"; printf '    %s\n' "${PATHMAP[@]}" >&2
-    log "  处理: 用 DSH_HOST_ROOT=<dsh-files 所在的宿主绝对路径> 显式指定。"
-    return 1
+  return "$rc"
+}
+
+cache_key() { printf '%s|%s|%s' "$DSH_IMAGE" "$DSH_ROOT" "${DSH_HOST_ROOT:-}" | cksum | tr -d ' \n'; }
+
+load_pathmap_cache() {
+  [ -r "$PATHMAP_CACHE" ] || return 1
+  local key line first=1
+  PATHMAP=()
+  while IFS= read -r line; do
+    if [ "$first" = 1 ]; then key="$line"; first=0; continue; fi
+    [ -n "$line" ] && PATHMAP+=("$line")
+  done < "$PATHMAP_CACHE"
+  [ "${key:-}" = "$(cache_key)" ] && [ ${#PATHMAP[@]} -gt 0 ]
+}
+
+save_pathmap_cache() {
+  mkdir -p "$(dirname "$PATHMAP_CACHE")" 2>/dev/null || return 0
+  { cache_key; printf '%s\n' "${PATHMAP[@]}"; } > "$PATHMAP_CACHE" 2>/dev/null || true
+}
+
+# 逐个候选试，第一个【实测通过】的采用。
+#
+# 候选顺序有讲究：
+#   1 DSH_HOST_ROOT —— 运维显式给的，最权威
+#   2 自省本容器 Mounts —— 兄弟模式（挂了宿主 socket）的正解
+#   3 恒等映射 —— 我们本来就在宿主上，或者容器内自己跑了 dockerd（DinD）。
+#     DinD 那种情况自省一定失败（内层守护进程不认识外层容器），早先直接
+#     报 NO_PATHMAP 就把这条路堵死了——其实它的路径本来就是同构的。
+# 每个候选都要过 probe_map 那一关，所以「猜」不会变成「蒙着眼睛挂」。
+resolve_pathmap() {
+  if load_pathmap_cache; then return 0; fi
+
+  local -a tried=()
+  local desc
+
+  if [ -n "${DSH_HOST_ROOT:-}" ]; then
+    PATHMAP=("$DSH_ROOT|$DSH_HOST_ROOT"); desc="DSH_HOST_ROOT=$DSH_HOST_ROOT"
+    if probe_map; then log "路径映射: $desc（实测通过）"; save_pathmap_cache; return 0; fi
+    tried+=("$desc")
   fi
-  mkdir -p "$(dirname "$PATHMAP_CACHE")"
-  echo "$fp" > "$PATHMAP_CACHE"
-  return 0
+
+  if in_container; then
+    local -a m=()
+    local line
+    while read -r line; do m+=("$line"); done < <(introspected_map || true)
+    if [ ${#m[@]} -gt 0 ]; then
+      PATHMAP=("${m[@]}"); desc="自省本容器 Mounts（${#m[@]} 条）"
+      if probe_map; then log "路径映射: $desc（实测通过）"; save_pathmap_cache; return 0; fi
+      tried+=("$desc")
+    else
+      tried+=("自省本容器 Mounts（拿不到，可能是容器内自跑的 dockerd）")
+    fi
+  fi
+
+  PATHMAP=("/|/"); desc="恒等映射（宿主直跑或 DinD）"
+  if probe_map; then log "路径映射: $desc（实测通过）"; save_pathmap_cache; return 0; fi
+  tried+=("$desc")
+
+  PATHMAP=()
+  log "所有候选的路径映射都没通过实测——挂进容器的目录里看不到标记文件。"
+  log "  已试过:"; printf '    - %s\n' "${tried[@]}" >&2
+  log "  多半是数据目录只存在于本容器的可写层里，宿主上没有对应路径，"
+  log "  兄弟容器物理上挂不到它。处理办法二选一："
+  log "    a) 重起主容器时把数据目录 bind mount 进来（-v /宿主某处:$DSH_ROOT）"
+  log "    b) 已知宿主路径的话直接给: DSH_HOST_ROOT=<宿主上的绝对路径>"
+  return 1
 }
 
 container_name() { echo "$DSH_CONTAINER_PREFIX-$1"; }
@@ -152,13 +196,10 @@ backend_probe() {
   if [ ! -r "$CONTAINER_ENTRY" ]; then
     echo "NO_ENTRY"; log "找不到容器入口脚本: $CONTAINER_ENTRY"; return 1
   fi
-  if ! build_pathmap; then
+  if ! resolve_pathmap; then
     echo "NO_PATHMAP"
-    log "无法确定「容器内路径 -> 宿主路径」的换算（自省本容器 Mounts 失败）。"
-    log "  处理: 设 DSH_HOST_ROOT=<$DSH_ROOT 在宿主上的绝对路径>。"
     return 1
   fi
-  verify_pathmap || { echo "BAD_PATHMAP"; return 1; }
   echo "OK image=$DSH_IMAGE map=${#PATHMAP[@]}项"
   return 0
 }
@@ -171,8 +212,7 @@ backend_run() {
   docker_ok || die "docker 不可用（调度器本应先 probe 过）"
   validate_run_args "$PORT" "$DSH_HOME_DIR" "$WORKSPACE"
   image_ok || die "镜像不存在: $DSH_IMAGE（scripts/build-dsh-image.sh）"
-  build_pathmap || die "无法建立宿主路径映射，设 DSH_HOST_ROOT 显式指定"
-  verify_pathmap || die "宿主路径映射校验不通过，拒绝以错误的挂载启动实例"
+  resolve_pathmap || die "定不出可用的宿主路径映射，拒绝以错误的挂载启动实例"
 
   WORKSPACE=$(readlink -f "$WORKSPACE")
   DSH_HOME_DIR=$(readlink -f "$DSH_HOME_DIR")
