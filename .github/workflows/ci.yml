@@ -412,7 +412,9 @@ jobs:
             isolation: 'auto'
           - shape: 容器·特权·容器内自跑dockerd（真嵌套）
             expect: container
-            args: '--privileged'
+            # --cgroupns=private：给这个容器一个自己的 cgroup 根，
+            # 否则内层 dockerd 会撞上 runner 那个 threaded 模式的根 cgroup
+            args: '--privileged --cgroupns=private'
             nonroot: 'no'
             block_userns: '0'
             need_image: 'no'

@@ -56,6 +56,20 @@ if [ "${SHAPE_START_DOCKERD:-0}" = "1" ]; then
   say "在本容器内启动 dockerd（真·嵌套：员工容器将是本容器的孩子）"
   [ "$(id -u)" = "0" ] || fail "启动 dockerd 需要 root —— 这正是嵌套的硬前提"
   command -v dockerd >/dev/null 2>&1 || fail "本镜像里没有 dockerd"
+
+  # cgroup v2 委派：根 cgroup 里只要还挂着进程，就处于 threaded 模式，
+  # 不能把 domain 控制器交给子 cgroup，内层 dockerd 建容器时会报
+  #   cannot enter cgroupv2 ... with domain controllers -- it is in threaded mode
+  # 标准解法是先把根里的进程全挪进一个叶子，再把控制器下放。
+  # 尽力而为：做不到就让 dockerd 自己去报错，不在这里假装成功。
+  if [ -w /sys/fs/cgroup/cgroup.procs ] 2>/dev/null; then
+    mkdir -p /sys/fs/cgroup/init 2>/dev/null || true
+    xargs -rn1 < /sys/fs/cgroup/cgroup.procs > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true
+    sed -e 's/ / +/g' -e 's/^/+/' < /sys/fs/cgroup/cgroup.controllers \
+      > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
+    echo "  · cgroup 委派: subtree_control=$(cat /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || echo 读不到)"
+  fi
+
   # vfs 存储驱动：overlay-on-overlay 在很多内核上不被允许，vfs 慢但一定能用
   dockerd --storage-driver=vfs > /tmp/dockerd.log 2>&1 &
   for _ in $(seq 1 40); do docker info >/dev/null 2>&1 && break; sleep 1; done
