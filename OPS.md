@@ -210,8 +210,12 @@ dsh --version
 |----|------|------|--------------|
 | `container` | 每实例一个独立容器 | 够得到 docker 守护进程 | `scripts/build-dsh-image.sh` 构建实例镜像；容器里跑要把宿主 socket 挂进来 |
 | `bwrap` | bubblewrap 挂载命名空间 | 非特权 userns，或容器内 root + CAP_SYS_ADMIN | `scripts/install-bubblewrap.sh`；Ubuntu 24.04+ 还要 `sudo scripts/apparmor-allow-userns.sh` |
+| `landlock` | 内核的非特权自我沙箱 | **只需内核 5.13+ 编进 Landlock** | **无需任何准备**，也不用求宿主配合。验一下：`python3 dsh-runtime/dsh-landlock-exec.py --selftest` |
 | `uid` | 独立 OS 用户 + 文件权限 | 容器内 root，且**摸不到 docker socket** | 无需准备；部门级权限还需文件系统支持 ACL（`apt-get install acl`） |
 | `none` | 无隔离，仅排障 | `DSH_ALLOW_UNCONFINED=1` | —— |
+
+**拿不到 root、也拿不到 userns 的容器里，`landlock` 往往是唯一还活着的一档。**
+它是本项目在这种环境下的默认答案——前两档都要容器外的人配合一次，它不用。
 
 `DSH_ISOLATION=<档名>` 可以强制指定（也接受空格分隔的候选列表），默认 `auto`。
 
@@ -232,11 +236,13 @@ dsh --version
 
 档位之间的差别只在**文件之外**的维度，`preflight-sandbox.sh` 会如实标注：
 
-| | container | bwrap | uid |
-|---|---|---|---|
-| 独立 pid ns（`ps` 看不到宿主进程） | ✔ | ✔ | ✘ |
-| 独立 net ns（连不到别人的实例） | ✔ | 需 `DSH_NETNS=1` | ✘ |
-| 资源限额 | ✔ | ✘ | ✘ |
+| | container | bwrap | landlock | uid |
+|---|---|---|---|---|
+| 越界的表现 | 文件不存在 | 文件不存在 | 拒绝访问 | 拒绝访问 |
+| 独立 pid ns（`ps` 看不到宿主进程） | ✔ | ✔ | ✘ | ✘ |
+| 连不到别人的实例端口 | ✔ | 需 `DSH_NETNS=1` | ✔ TCP 端口白名单 | ✘ |
+| kill 不到别人的进程 | ✔ | ✔ | ✔ ABI v6+ | ✘ |
+| 资源限额 | ✔ | ✘ | ✘ | ✘ |
 
 共享 `profiles/` 一律挂成**只读**：此前它对所有实例可写，任何员工都能改写
 `clamped-picker/index.mjs` 影响全体。
@@ -260,6 +266,24 @@ export DSH_HOST_ROOT=/srv/dsh     # $DSH_ROOT 在宿主上的绝对路径
 `DSH_CONTAINER_MEMORY` / `DSH_CONTAINER_CPUS` / `DSH_CONTAINER_PIDS`、
 `DSH_PUBLISH_ADDR`（默认 `127.0.0.1`，**不要改成 0.0.0.0**，那等于把实例直接
 暴露到局域网，绕过 SSO）。
+
+#### landlock 档：它给到什么、给不到什么
+
+这一档由 `dsh-runtime/dsh-landlock-exec.py` 实现——纯 ctypes 直调三个系统调用，
+不用编译、不用装包（那种受限环境里多半也装不了东西）。进程给自己上锁后
+**不可撤销、子进程继承、exec 后仍在**，所以 dsh 起的 bash、bash 起的 cat
+全都带着这把锁。
+
+按内核 ABI 逐级增强：v1+ 文件系统，v3+ 截断，**v4+ TCP bind/connect**
+（封死「员工 A 直连员工 B 的实例端口」），v5+ ioctl，**v6+ scope**
+（kill 不到沙箱外的进程、连不上沙箱外的抽象 unix socket）。
+
+可调项：`DSH_LANDLOCK_CONNECT_PORTS`（默认 `443 80 22`）。
+**不要把 13100-13199 加进去**——那等于把上面那条好不容易封住的路重新打开。
+
+给不到的：没有 pid namespace（`ps` 看得到全机进程和命令行）、没有资源限额、
+越界报的是「拒绝访问」而不是「不存在」（路径存在性仍会泄露一点）。
+私有 `TMPDIR` 指向 `$DSH_HOME/tmp`，`/tmp` 不放行——那是全机共享的。
 
 #### uid 档：它给不到什么
 

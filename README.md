@@ -47,13 +47,15 @@
 ├── dsh-runtime/
 │   ├── start-all.sh           # 全栈幂等启动入口（容器 entrypoint 调用）
 │   ├── dsh-sandbox.sh         # 隔离调度器：探测环境 -> 择优选档 -> fail-closed
-│   ├── backends/              # 四档隔离的具体实现（接口统一：probe / run）
+│   ├── backends/              # 各档隔离的具体实现（接口统一：probe / run）
 │   │   ├── common.sh          #   挂载解析、环境变量白名单、环境形状探测
 │   │   ├── container.sh       #   ① 独立容器（最强，需要够得到 dockerd）
 │   │   ├── bwrap.sh           #   ② 挂载命名空间（需 userns 或 root+CAP_SYS_ADMIN）
-│   │   ├── uid.sh             #   ③ 独立 OS 用户 + DAC（需容器内 root，且无 docker socket）
-│   │   └── none.sh            #   ④ 无隔离，必须显式放行，仅排障
+│   │   ├── landlock.sh        #   ③ 内核自我沙箱（只需内核 5.13+，不用求任何人）
+│   │   ├── uid.sh             #   ④ 独立 OS 用户 + DAC（需容器内 root，且无 docker socket）
+│   │   └── none.sh            #   ⑤ 无隔离，必须显式放行，仅排障
 │   ├── dsh-container-entry.sh # 实例容器内的入口（端口桥接）
+│   ├── dsh-landlock-exec.py   # Landlock 上锁器（纯 ctypes，无需编译/装包）
 │   ├── Dockerfile.instance    # 实例容器镜像
 │   └── dsh-start.sh           # admin 主实例启动
 ├── dsh-auth/
@@ -85,7 +87,9 @@
 ./scripts/build-dsh-image.sh              # ① 有 docker：构建实例镜像，走最强的容器档
 ./scripts/install-bubblewrap.sh           # ② 宿主放行了 userns：无 root 装 bwrap
 sudo ./scripts/apparmor-allow-userns.sh   #    Ubuntu 24.04+ 还要放行，先跑 --status 看是否必要
-#                                         # ③ 容器内是 root 且没有 docker socket：uid 档无需准备
+#                                         # ③ 内核 5.13+：landlock 档【无需任何准备】，验一下即可：
+python3 dsh-runtime/dsh-landlock-exec.py --selftest
+#                                         # ④ 容器内是 root 且没有 docker socket：uid 档无需准备
 
 ./scripts/preflight-sandbox.sh            # 逐项实测，全绿才算数（挑中哪一档都跑这个）
 
@@ -197,12 +201,13 @@ python3 -m unittest discover -s tests -v
 | 内核 | 隔离调度器 `dsh-runtime/dsh-sandbox.sh` 选中的那一档（见下表） | 一切文件访问。工作区以外的路径在实例内不存在或读不到，bash 用绝对路径也绕不过去 |
 | UX | 目录选择器钳制插件（`dsh-plugin-clamped-picker`） | 选择器默认开在根目录、面包屑不显示上层 |
 
-四档按隔离强度排序，调度器挑第一个**在这台机器上真跑得起来**的：
+各档按隔离强度排序，调度器挑第一个**在这台机器上真跑得起来**的：
 
 | 档 | 机制 | 前提 |
 |----|------|------|
 | `container` | 每实例一个独立容器：mount/net/pid ns + 独立 UID + 资源限额 | 够得到 docker 守护进程 |
 | `bwrap` | bubblewrap 挂载命名空间 | 非特权 userns，或容器内 root + CAP_SYS_ADMIN |
+| `landlock` | 内核的非特权自我沙箱：文件系统 + TCP 端口 + 信号（无 pid ns） | **只需内核 5.13+，不要 root、不要 userns、不要 docker** |
 | `uid` | 独立 OS 用户 + 文件权限（无 pid/net ns，如实标注） | 容器内 root，且**摸不到 docker socket** |
 | `none` | 无隔离，仅排障 | 必须 `DSH_ALLOW_UNCONFINED=1` 显式放行 |
 
@@ -246,12 +251,12 @@ python3 admin/cli.py sync-nginx            # nginx upstream 换成 unix socket
 
 ### 已知残留风险（随选中的档位而变）
 
-| 风险 | container | bwrap（默认） | bwrap + `DSH_NETNS=1` | uid |
-|------|-----------|--------------|----------------------|-----|
-| 员工 A 直连员工 B 的 dsh 端口驱动其 agent | 已封堵（各自独立 netns，端口只发布到宿主回环） | **未封堵** | 已封堵（宿主回环上不留 dsh 端口） | **未封堵** |
-| `ps` 看到全机进程与命令行 | 已封堵 | 已封堵 | 已封堵 | **未封堵** |
-| 一个员工吃光内存拖垮全体 | 已封堵（`--memory`/`--cpus`/`--pids-limit`） | 未封堵 | 未封堵 | 未封堵 |
-| 主管的部门级权限 | 支持 | 支持 | 支持 | 需文件系统支持 ACL |
+| 风险 | container | bwrap（默认） | bwrap + `DSH_NETNS=1` | landlock | uid |
+|------|-----------|--------------|----------------------|----------|-----|
+| 员工 A 直连员工 B 的 dsh 端口驱动其 agent | 已封堵（各自独立 netns，端口只发布到宿主回环） | **未封堵** | 已封堵（宿主回环上不留 dsh 端口） | 已封堵（TCP 端口白名单，ABI v4+） | **未封堵** |
+| `ps` 看到全机进程与命令行 | 已封堵 | 已封堵 | 已封堵 | **未封堵** | **未封堵** |
+| 一个员工吃光内存拖垮全体 | 已封堵（`--memory`/`--cpus`/`--pids-limit`） | 未封堵 | 未封堵 | 未封堵 | 未封堵 |
+| 主管的部门级权限 | 支持 | 支持 | 支持 | 支持 | 需文件系统支持 ACL |
 
 与档位无关、已封堵的两条：
 

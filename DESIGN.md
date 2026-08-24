@@ -27,16 +27,26 @@ namespace**，而这个开关在宿主机上、容器内改不了。
 - 应用层限制（目录选择器钳制）挡不住 dsh 的 bash 工具，它可以用绝对路径直接读写
 - 于是没有任何强制点
 
-**能做强制点的只有三种边界**，每一种都需要一个前提：
+**能做强制点的边界有四种**，每一种都需要一个前提：
 
 | 边界 | 需要什么 | 对应后端 |
 |------|---------|---------|
 | 不同容器 | 够得到 docker 守护进程 | `container` |
 | 命名空间 | 非特权 userns（宿主放行）**或** 容器内 root + CAP_SYS_ADMIN | `bwrap` |
+| **内核自我沙箱** | **只需内核 5.13+ 编进 Landlock，别的都不要** | **`landlock`** |
 | 不同 UID | 容器内 root（能 `useradd`）**且** 摸不到 docker socket | `uid` |
 
-三条都拿不到就是做不到。任何声称在那种条件下实现了隔离的方案都是自欺，所以第
-四档 `none` 只能显式放行、只供排障。
+**第三行是后来补上的，它推翻了这一节原本的悲观结论。** 前两条与第四条都要
+容器外的人配合一次（宿主内核开关 / docker socket / 容器内 root），于是我一度
+判定「拿不到 root 也拿不到 userns 的容器里做不到隔离」。那是错的：Linux 从
+5.13 起有 Landlock，就是给非特权进程自我上锁用的——普通用户进程声明「我只能
+读写这几个路径」，上锁后不可撤销、子进程继承、exec 后仍在。现场那台机器实测
+ABI v8，什么都不用求人。
+
+这个遗漏的教训和第一节是同一个：我按「我熟悉的三种边界」枚举，而不是按
+「内核到底提供了什么」枚举，于是把一条现成的路漏掉了整整一轮。
+
+四条都拿不到才是真做不到。那时 `none` 只能显式放行、只供排障。
 
 ## 三、结论：不选一种，而是按环境探测择优
 
@@ -54,13 +64,15 @@ dsh-runtime/
 ├── dsh-sandbox.sh            调度器：探测 + 择优 + fail-closed
 ├── dsh-container-entry.sh    容器内入口（端口桥接）
 ├── dsh-netns-entry.sh        bwrap netns 模式的容器内入口
+├── dsh-landlock-exec.py      Landlock 上锁器（纯 ctypes，无需编译/装包）
 ├── Dockerfile.instance       实例镜像
 └── backends/
     ├── common.sh             挂载解析、环境变量白名单、形状探测（共用）
     ├── container.sh          ① 独立容器
     ├── bwrap.sh              ② 挂载命名空间（userns / privileged 两种形态）
-    ├── uid.sh                ③ 独立 OS 用户 + DAC
-    └── none.sh               ④ 无隔离，仅排障
+    ├── landlock.sh           ③ 内核自我沙箱（不需要任何外部配合）
+    ├── uid.sh                ④ 独立 OS 用户 + DAC
+    └── none.sh               ⑤ 无隔离，仅排障
 ```
 
 探测**不看配置、不看版本号，直接跑一次真家伙**：bwrap 真 `--unshare-all` 一
@@ -68,25 +80,27 @@ dsh-runtime/
 择器眼里一视同仁——第一版正是因为只判 `-x`，让「存在但坏」走进沙箱分支反复失
 败，运维只能把 bwrap 改名骗过检测。
 
-`DSH_ISOLATION` 可以强制指定某一档（`container` / `bwrap` / `uid` / `none`，
+`DSH_ISOLATION` 可以强制指定某一档（`container` / `bwrap` / `landlock` / `uid` / `none`，
 也接受空格分隔的候选列表），默认 `auto`。
 
 `dsh-sandbox.sh --report` 打印完整的能力报告：这台机器是不是容器、当前 uid、
-userns 通不通、有没有 CAP_SYS_ADMIN、docker 够不够得着、每一档为什么可用或不
+userns 通不通、有没有 CAP_SYS_ADMIN、Landlock ABI 多少、docker 够不够得着、每一档为什么可用或不
 可用、最终选了哪一档。**运维不该读代码才知道为什么。**
 
 ### 各档给到什么、给不到什么
 
-| | container | bwrap | uid | none |
-|---|---|---|---|---|
-| 工作区外的文件读不到 | ✔ 挂载隔离 | ✔ 挂载隔离 | ✔ DAC | ✘ |
-| 员工之间互不可见 | ✔ | ✔ | ✔ | ✘ |
-| 独立 pid ns（ps 看不到别人） | ✔ | ✔ | ✘ | ✘ |
-| 独立 net ns（连不到别人的实例） | ✔ | 需 `DSH_NETNS=1` | ✘ | ✘ |
-| 资源限额（内存/CPU/进程数） | ✔ | ✘ | ✘ | ✘ |
-| docker socket 逃逸 | ✔ 不挂进去 | ✔ 不挂 `/var` | ✘ **一票否决** | ✘ |
-| 主管的部门级权限 | ✔ 多挂一个卷 | ✔ 多挂一个 bind | 需文件系统支持 ACL | — |
-| 前提 | 够得到 dockerd | userns 或 root+CAP_SYS_ADMIN | 容器内 root 且无 docker socket | 显式放行 |
+| | container | bwrap | landlock | uid | none |
+|---|---|---|---|---|---|
+| 工作区外的文件读不到 | ✔ 挂载隔离 | ✔ 挂载隔离 | ✔ 内核自我沙箱 | ✔ DAC | ✘ |
+| 越界的表现 | 不存在 | 不存在 | 拒绝访问 | 拒绝访问 | — |
+| 员工之间互不可见 | ✔ | ✔ | ✔ | ✔ | ✘ |
+| 独立 pid ns（ps 看不到别人） | ✔ | ✔ | ✘ | ✘ | ✘ |
+| 连不到别人的实例端口 | ✔ netns | 需 `DSH_NETNS=1` | ✔ TCP 端口白名单（ABI v4+） | ✘ | ✘ |
+| kill 不到别人的进程 | ✔ | ✔ | ✔ scope（ABI v6+） | ✘ | ✘ |
+| 资源限额（内存/CPU/进程数） | ✔ | ✘ | ✘ | ✘ | ✘ |
+| docker socket 逃逸 | ✔ 不挂进去 | ✔ 不挂 `/var` | ✔ 不放行 `/var` | ✘ **一票否决** | ✘ |
+| 主管的部门级权限 | ✔ 多挂一个卷 | ✔ 多挂一个 bind | ✔ 多加一条规则 | 需文件系统支持 ACL | — |
+| 前提 | 够得到 dockerd | userns 或 root+CAP_SYS_ADMIN | **内核 5.13+，仅此而已** | 容器内 root 且无 docker socket | 显式放行 |
 
 `uid` 档那一行的 ✘ 是决定性的：容器里有 docker socket、员工的 dsh 又有 shell，
 够得到就是一句话逃逸——
@@ -104,12 +118,15 @@ docker run -v /:/host alpine cat /host/etc/shadow
 已实测确认：`/.dockerenv` 存在（在容器里）、`ubuntu ∈ docker(994)`（够得到
 socket）、`sudo` 需密码、`apparmor_restrict_unprivileged_userns=1`。逐档过一遍：
 
-- container：docker 可达 → **可用，选它**
+- container：后续查明 dockerd 根本没在跑（socket 是个死文件）→ 不可用
 - bwrap：userns 被宿主拦住，容器内改不了 → 不可用
-- uid：非 root，且有 docker socket → 双重不可用
-- none：当前正是这一档在跑，**所以现在每个员工的 dsh 都能逃到宿主 root**
+- uid：非 root，且容器里【没有 sudo】（我一度从 `groups` 有 27(sudo) 误推成
+  能用——那是组成员身份，不是程序存在）→ 不可用
+- **landlock：实测 ABI v8 → 可用，最终选它**
+- none：改造前正是这一档在跑
 
-**这台机器上，实例应当先停掉，等 container 档就位再拉起。**
+也就是说，这台机器最后**什么都不用求人**：`landlock` 档不需要 root、不需要
+userns、不需要 docker。走了几轮弯路才找到它，根因见第二节那段自省。
 
 ### 容器后端落地时第一个会踩的坑：volume 路径
 
@@ -132,9 +149,11 @@ socket）、`sudo` 需密码、`apparmor_restrict_unprivileged_userns=1`。逐�
 
 | 形状 | 怎么造出来 | 期望 |
 |------|-----------|------|
-| 容器·非 root·无命名空间·无 docker | `--user <uid>`，不挂 socket | **拒绝启动**（fail-closed） |
+| 容器·非 root·无命名空间·无 docker（= 现场那台） | `--user <uid>`，不挂 socket | 自动选 `landlock`，隔离验收全过 |
+| 容器·非 root·连 Landlock 也没有 | 同上，候选里排除 landlock | **拒绝启动**（fail-closed） |
 | 容器·root·无命名空间·无 docker | root，不挂 socket | 选 `uid`，隔离验收全过 |
-| 容器·非 root·挂了宿主 docker socket | `-v /var/run/docker.sock:...`（= 现场那台） | 选 `container`，隔离验收全过 |
+| 容器·特权·容器内自跑 dockerd | `--privileged --cgroupns=private` | 真嵌套，选 `container`，隔离验收全过 |
+| 容器·非 root·挂了宿主 docker socket | `-v /var/run/docker.sock:...` | 兄弟容器，选 `container`，隔离验收全过 |
 | 容器·root·特权 | `--privileged` | 选 `bwrap`（privileged 形态） |
 | 宿主·userns 放开 | runner 本机 + `sysctl=0` | 选 `bwrap`（userns 形态），99+ 项单测 |
 
@@ -149,13 +168,13 @@ token、其他部门与同部门同事的文件），读到了就红。不看配
 
 | 动作 | 内容 |
 |------|------|
-| 新增 | `dsh-sandbox.sh` 改为调度器；`backends/` 四个后端 + `common.sh`；`dsh-container-entry.sh`；`Dockerfile.instance`；`scripts/build-dsh-image.sh`；`scripts/make-fake-deploy.sh`；`tests/env-shape.sh`；CI `env-matrix` |
-| 改 | `preflight-sandbox.sh` 改为按后端分档判定（uid 档没有 pid ns，如实标注为 info 而不是伪装成通过）；启动脚本与管理后台横幅显示当前档位 |
+| 新增 | `dsh-sandbox.sh` 改为调度器；`backends/` 五个后端 + `common.sh`；`dsh-container-entry.sh`；`dsh-landlock-exec.py`；`Dockerfile.instance`；`scripts/build-dsh-image.sh`；`scripts/make-fake-deploy.sh`；`tests/env-shape.sh`；CI `env-matrix` |
+| 改 | `preflight-sandbox.sh` 改为按后端分档判定（uid / landlock 档没有 pid ns，如实标注为 info 而不是伪装成通过），且探针无输出时摊出启动报错而不是显示一堆假红；启动脚本与管理后台横幅显示当前档位 |
 | 不动 | nginx 路由、空间模型 `space_for()`、建号引擎、管理后台 API、密钥头机制、`core.py` 与隔离层的接口 |
 
 `core.py` 与隔离层的耦合仍然只有那一行 `dsh-sandbox.sh <user> <port> <home>
 <ws>`，加上新增的 `--backend` 查询。当初把它做成一个独立脚本而不是散落各处，
-这次换成四个后端时上层一行没动。
+这次换成五个后端时上层一行没动。
 
 ## 六、与隔离机制无关、但现在就该做的
 
