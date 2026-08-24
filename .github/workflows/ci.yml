@@ -46,6 +46,14 @@ jobs:
           fi
           echo "✅ 沙箱可用"
 
+      - name: 报告本 runner 的 Landlock 支持情况
+        # 纯信息性，永不失败。Landlock 是「不需要 root 也不需要 userns」的那一档，
+        # runner 内核支不支持决定了 env-matrix 里那个形状能不能真验。
+        run: |
+          uname -r
+          python3 dsh-runtime/dsh-landlock-exec.py --selftest || true
+          cat /sys/kernel/security/lsm 2>/dev/null || echo "(securityfs 未挂载)"
+
       - name: 跑测试
         run: python3 -m unittest discover -s tests -v
 
@@ -365,6 +373,7 @@ jobs:
             block_userns: '1'
             need_image: 'no'
             dind: 'no'
+            isolation: 'auto'
           - shape: 容器·root·无命名空间·无docker
             expect: uid
             args: ''
@@ -372,6 +381,7 @@ jobs:
             block_userns: '1'
             need_image: 'no'
             dind: 'no'
+            isolation: 'auto'
           - shape: 容器·非root·无命名空间·挂了宿主docker-socket
             expect: container
             args: '-v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker:ro'
@@ -379,6 +389,7 @@ jobs:
             block_userns: '1'
             need_image: 'yes'
             dind: 'no'
+            isolation: 'auto'
           - shape: 容器·root·特权
             expect: bwrap
             args: '--privileged'
@@ -386,6 +397,7 @@ jobs:
             block_userns: '0'
             need_image: 'no'
             dind: 'no'
+            isolation: 'auto'
           - shape: 容器·特权·容器内自跑dockerd（真嵌套）
             expect: container
             args: '--privileged'
@@ -393,6 +405,15 @@ jobs:
             block_userns: '0'
             need_image: 'no'
             dind: 'yes'
+            isolation: 'auto'
+          - shape: 容器·非root·只有Landlock可用
+            expect: landlock
+            args: ''
+            nonroot: 'yes'
+            block_userns: '1'
+            need_image: 'no'
+            dind: 'no'
+            isolation: 'landlock'
     steps:
       - uses: actions/checkout@v4
 
@@ -461,6 +482,7 @@ jobs:
             -e REPO=/deploy \
             -e "SHAPE_BLOCK_USERNS=${{ matrix.block_userns }}" \
             -e "SHAPE_START_DOCKERD=$START_DOCKERD" \
+            -e "DSH_ISOLATION=${{ matrix.isolation }}" \
             $ARGS \
             "$IMAGE" \
             bash /deploy/tests/env-shape.sh "${{ matrix.expect }}" /deploy/fakedeploy \
