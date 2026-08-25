@@ -301,11 +301,12 @@ backend_run() {
   # pasta 建独立 netns 并提供出网；-t none -u none 表示不做任何入站端口转发，
   # 入站只走 unix socket。--no-map-gw 断掉经网关回连宿主的路径。
   # bwrap 在 pasta 的 netns 里用 --share-net（共享的是 pasta 的，不是宿主的）。
-  # --no-splice 是这一档【成立的前提】，不是可选优化：
-  # pasta 默认会把命名空间内对 127.0.0.1:PORT 的连接直接 splice 到【宿主回环】，
-  # 于是员工 A 照样连得到员工 B 的实例端口——netns 模式最核心的那个卖点
-  # （实例之间互不可达）直接落空，而 preflight 之前因为没人监听而恒绿。
-  # CI 上实测过：不带这个参数时「其他员工的 dsh 实例 HTTP 200 可达」。
+  # --no-splice 让本地连接走 pasta 的 TCP 栈而不是绕过它的快路径。
+  # 【它并不能阻断对宿主回环的访问】——我一度以为可以，CI 证伪了：带着这个
+  # 参数，沙箱内连 127.0.0.1:<同僚端口> 仍然 HTTP 200。pasta 的设计目标就是
+  # 把宿主的网络连通性带进命名空间，宿主回环也在其中。
+  # 保留它没有坏处，但【不要】把它当成「同僚端口已封死」的依据：
+  # 本档在这一项上目前不满足要求，preflight 会如实判红。详见 DESIGN.md。
   exec pasta --config-net --no-map-gw --no-splice -t none -u none \
     --dns-forward "$DSH_DNS_FORWARD" -- \
     "$BWRAP" "${args[@]}" -- bash "$NETNS_ENTRY"
