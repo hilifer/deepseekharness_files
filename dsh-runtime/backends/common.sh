@@ -227,7 +227,7 @@ build_trusted_host_args() {
 # 【为什么默认不设 RLIMIT_AS】V8 会预留大量【虚拟】地址空间（远超实际用量），
 # 设了 -v 之后 node 经常直接起不来。要限内存请用 container 档的 cgroup，
 # 那才是按【实际驻留】算的。这里留出开关，但默认空。
-DSH_RLIMIT_NPROC="${DSH_RLIMIT_NPROC:-512}"     # 进程数，挡 fork 炸弹
+DSH_RLIMIT_NPROC="${DSH_RLIMIT_NPROC:-4096}"     # 进程数，挡 fork 炸弹
 DSH_RLIMIT_NOFILE="${DSH_RLIMIT_NOFILE:-4096}"  # 打开文件数
 DSH_RLIMIT_FSIZE="${DSH_RLIMIT_FSIZE:-}"        # 单文件大小(block)，空=不限
 DSH_RLIMIT_AS="${DSH_RLIMIT_AS:-}"              # 虚拟内存(KB)，空=不限，见上
