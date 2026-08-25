@@ -982,5 +982,54 @@ class NginxUnauthenticatedPathTest(unittest.TestCase):
                       "免认证路径没有任何理由拿到会话凭据")
 
 
+class LandlockAccessMaskTest(unittest.TestCase):
+    """给【非目录】加规则不能带目录专属访问位，否则内核回 EINVAL。
+
+    实测踩过：add_rule(/dev/null) 失败: Invalid argument。上锁器早先假定
+    所有目标都是目录（当时给的确实都是目录），一旦逐个放行 /dev/null 之类
+    设备节点，第一条规则就炸、实例直接拒绝启动。
+
+    这条不需要内核支持 Landlock —— 裁剪是纯计算，任何机器上都能验。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "ll", REPO / "dsh-runtime" / "dsh-landlock-exec.py")
+        cls.ll = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.ll)
+
+    def test_directory_keeps_read_dir(self):
+        ro = self.ll.ro_access(7)
+        self.assertTrue(self.ll.effective_access(ro, True) & self.ll.FS["read_dir"])
+
+    def test_file_drops_directory_only_bits(self):
+        """READ_DIR / MAKE_* / REFER 带到文件上就是 EINVAL。"""
+        rw = self.ll.rw_access(7)
+        got = self.ll.effective_access(rw, False)
+        for bit in ("read_dir", "make_reg", "make_dir", "make_char",
+                    "make_sock", "make_fifo", "make_block", "make_sym",
+                    "remove_dir", "remove_file", "refer"):
+            self.assertFalse(got & self.ll.FS[bit], f"文件上不该保留 {bit}")
+
+    def test_file_keeps_the_bits_that_matter(self):
+        """裁剪不能把真正需要的读写执行位一起削掉——/dev/null 要能写。"""
+        got = self.ll.effective_access(self.ll.rw_access(7), False)
+        for bit in ("read_file", "write_file"):
+            self.assertTrue(got & self.ll.FS[bit], f"文件上丢了 {bit}")
+
+    def test_readonly_file_still_executable(self):
+        """只读目标里有 /usr/bin 下的可执行文件，execute 位不能被裁掉。"""
+        got = self.ll.effective_access(self.ll.ro_access(7), False)
+        self.assertTrue(got & self.ll.FS["execute"])
+
+    def test_dir_only_request_on_file_becomes_empty(self):
+        """只要了 read_dir 却指向文件 -> 裁成 0。调用方据此跳过，
+        不能拿 0 去 add_rule（空访问位同样 EINVAL）。"""
+        self.assertEqual(
+            self.ll.effective_access(self.ll.FS["read_dir"], False), 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
