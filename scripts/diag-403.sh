@@ -47,14 +47,23 @@ for H in "127.0.0.1:8099" "$(hostname):8099" "localhost:8099" "127.0.0.1:$PORT";
          -H "Host: $H" -H "Origin: https://$H" \
          "http://127.0.0.1:$PORT/api/settings.describe" 2>/dev/null)
   case "$CODE" in
-    403) echo "  ❌ Host: $H  -> 403（不在 --trusted-host 白名单里）" ;;
+    403) echo "  ❌ Host: $H  -> 403（普通接口=不在白名单；特权方法=非回环来源，见第 3 节）" ;;
     000) echo "  ·  Host: $H  -> 连不上" ;;
     *)   echo "  ✅ Host: $H  -> HTTP $CODE（这个 host 是被接受的）" ;;
   esac
 done
 echo
 echo "=== 3. 结论 ==="
-echo "  浏览器地址栏里用的 host:port，必须出现在第 1 节那份白名单里。"
-echo "  不在的话，把它加进去："
-echo "    DSH_TRUSTED_HOSTS=\"已有的三个 你要用的host:端口\""
-echo "  改 admin/core.py 的 trusted_hosts 默认值（或用环境变量），然后重启实例。"
+echo "  分两种情况，别混："
+echo
+echo "  A. 普通接口 403（chat.* 之类）"
+echo "     -> 地址栏里的 host:port 不在第 1 节那份白名单里。加进去："
+echo "        DSH_TRUSTED_HOSTS=\"已有的 你要用的host:端口\"  然后重启实例"
+echo
+echo "  B. 特权方法 403（settings.* / credentials.* / agentPreset.* /"
+echo "     host.pickDirectory|openPath / llm.discoverModels）"
+echo "     -> 【加白名单没用】。这些方法只应答回环来源，判定时根本不查"
+echo "        --trusted-host。非回环 Host 一律 403。"
+echo "     -> 解法是在代理层把 Host/Origin 改写成回环形式，本仓库已在"
+echo "        nginx.conf 里做了（map \$request_uri \$dsh_priv_loopback）。"
+echo "        还 403 的话先确认 nginx 配置已 reload、且该方法在白名单正则里。"

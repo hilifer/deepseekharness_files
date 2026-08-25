@@ -867,6 +867,35 @@ class TrustedHostAutodetectTest(unittest.TestCase):
         hosts = self._hosts({"DSH_TRUSTED_HOSTS": "a:1", "DSH_TRUSTED_AUTODETECT": "0"})
         self.assertEqual(hosts, ["a:1"])
 
+    def test_never_emits_bare_ipv6(self):
+        """裸 IPv6 拼端口不是合法 authority（要 [x:y]:port 方括号形式）。
+
+        dsh 的 assertTrustedAuthority 遇到一条非法项就【拒绝整份配置】——
+        不是忽略那一条，是所有实例都起不来。而 hostname -I 在启用了 IPv6 的
+        机器上必然列出 ULA/全局地址，所以这条一定要钉住：本机没 IPv6 不代表
+        部署的机器没有。
+        """
+        # 【必须用桩】本机没配 IPv6 的话，直接跑 hostname -I 这条断言是空转的，
+        # 恰恰是这类假绿让 IPv6 的 bug 漏了出去。这里强制喂一个含 IPv6 的输出。
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = Path(tmp) / "bin"; stub.mkdir()
+            (stub / "hostname").write_text(
+                "#!/bin/bash\n"
+                'case "${1:-}" in\n'
+                '  -I) echo "192.168.1.9 fdd6:1::5 fe80::1%eth0 2001:db8::7" ;;\n'
+                '  -f) echo "box.example.com" ;;\n'
+                '  *)  echo "box" ;;\n'
+                "esac\n", encoding="utf-8")
+            (stub / "hostname").chmod(0o755)
+            hosts = self._hosts({"DSH_TRUSTED_HOSTS": "", "DSH_ENTRY_PORT": "8099",
+                                 "PATH": f"{stub}:{os.environ['PATH']}"})
+        self.assertIn("192.168.1.9:8099", hosts, f"IPv4 被误杀了: {hosts}")
+        self.assertIn("box:8099", hosts, hosts)
+        for h in hosts:
+            # 去掉结尾的 :端口后仍含 ':' 就说明是裸 IPv6
+            self.assertNotIn(":", h.rsplit(":", 1)[0],
+                             f"名单里混进了裸 IPv6，dsh 会拒绝整份配置: {h}")
+
     def test_never_emits_a_wildcard(self):
         """自动补的都必须是本机【真实拥有】的地址。通配符/全零地址会把
         Host 校验变成摆设——那是真放宽，不是修 bug。"""
