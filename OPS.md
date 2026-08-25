@@ -455,3 +455,37 @@ bash scripts/diag-403.sh admin      # 员工账号就把 admin 换成用户名
 **不要**为了图省事往名单里加通配符或 `0.0.0.0` —— 那会把 Host 校验变成摆设，
 是真的放宽了安全边界，而不是修 bug。自动补进去的都是这台机器自己的地址，
 防的是跨站与 DNS 重绑定，不是防本机。
+
+### 补充：403 的真正成因是「特权 RPC 只应答回环」
+
+上面那节讲的 `--trusted-host` 是 403 的一类成因，但**现场那次不是它**。
+
+dsh 有一批特权方法（`settings.*`、`credentials.*`、`agentPreset.*`、
+`host.pickDirectory/openPath`、`llm.discoverModels`）**只应答回环来源**——这是它
+面向桌面部署的内置防线。服务器部署经反代进入时 Host 是公网/局域网域名，被这条
+防线拒掉，表现就是「页面能开、设置面板里模型/权限/预设三处全 403」。
+
+`nginx.conf` 对这些路径把转发的 Host/Origin 改写成回环形式，其余请求原样透传。
+
+**改这份白名单时必须守住两条：**
+
+1. **匹配 `$request_uri`，不能匹配 `$uri`。** `proxy_pass` 带变量且不含 URI 部分
+   时，nginx 转发的是客户端**原始**请求行，而 `$uri` 是归一化后的。按 `$uri` 判、
+   按原始串转发＝经典的代理解析错位，实测可复现：
+
+   ```
+   GET /api/host.openExternal/../settings.describe
+     nginx 看到 /api/settings.describe  -> 判特权，Host 改回环
+     dsh  收到原始串                     -> 可能路由到 openExternal
+   ```
+
+   任意方法都能凑前缀骗到回环身份。判定用的串必须和转发出去的串是同一个。
+
+2. **锚点要容忍查询串**（写 `(\?|$)` 而不是 `$`），否则 `?x=1` 一带就漏判，
+   症状是那个接口又开始 403。
+
+`tests/test_sandbox.py` 里 `NginxPrivilegedRpcMapTest` 钉住了这两条。
+
+残留风险（已知、暂未处理）：改写把 dsh 对这些方法的 CSRF/DNS 重绑定防线整体摘掉了，
+剩下的兜底是 Authelia 的 `same_site: lax`——它挡住跨站 POST 与子资源 GET，但**挡不住
+顶层 GET 跳转**。若这些方法接受 GET，一条构造好的链接就够。要收紧就确认它们只收 POST。

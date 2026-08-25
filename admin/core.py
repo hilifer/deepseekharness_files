@@ -753,8 +753,16 @@ class Engine:
             # 的、天然隔离；代价是共享插件更新后需对老用户重刷一次。
             try:
                 shutil.copytree(self.cfg.shared_profiles, profiles)
-            except OSError:
-                profiles.symlink_to(self.cfg.shared_profiles)
+            except OSError as exc:
+                # 【不要】在这里回落成软链。软链正是本次要修掉的那个形态：
+                # landlock/bwrap 档把共享 profiles 设为只读，dsh 启动时写
+                # profiles/web/cordis.yml 会被软链引到只读目录上直接 EACCES，
+                # 表现为实例起不来、而报错指向一个跟建号无关的地方。
+                # 拷不动是真异常（盘满、权限），当场说清楚，别留个坏实例。
+                raise ProvisionError(
+                    f"复制共享 profiles 失败: {self.cfg.shared_profiles} -> {profiles}（{exc}）\n"
+                    "  这一步不能用软链代替：只读的共享目录会让 dsh 启动时写配置直接 EACCES。\n"
+                    "  请检查磁盘空间与目录权限后重试。") from exc
         ws_file = dsh_home / "storages" / "workspace.json"
         if not ws_file.exists():
             wsid = secrets.token_hex(16)

@@ -875,5 +875,83 @@ class TrustedHostAutodetectTest(unittest.TestCase):
             self.assertNotIn(bad, hosts, hosts)
 
 
+class NginxPrivilegedRpcMapTest(unittest.TestCase):
+    """dsh 的特权 RPC 只应答回环来源，反代部署要把 Host/Origin 改写成回环。
+    这份白名单是安全边界，它的匹配对象错了整条边界就形同虚设。
+    """
+
+    CONF = REPO / "nginx" / "conf" / "nginx.conf"
+
+    def setUp(self):
+        self.text = self.CONF.read_text(encoding="utf-8")
+
+    def test_matches_request_uri_not_uri(self):
+        """必须匹配 $request_uri。
+
+        proxy_pass 带变量且不含 URI 部分时，nginx 转发【客户端原始的】请求行，
+        而 $uri 是归一化后的。按 $uri 判、按原始串转发，就是经典的代理解析错位：
+            GET /api/host.openExternal/../settings.describe
+            nginx 看到 /api/settings.describe -> 判特权，Host 改回环
+            dsh  收到原始串                    -> 可能路由到 openExternal
+        实测确认过。判定用的串必须和转发出去的串是同一个。
+        """
+        self.assertIn("map $request_uri $dsh_priv_loopback", self.text)
+        self.assertNotIn("map $uri $dsh_priv_loopback", self.text,
+                         "回退到 $uri 会重新打开解析错位")
+
+    def test_anchors_tolerate_query_string(self):
+        """匹配 $request_uri 就得自己处理查询串：写死 $ 会让
+        /api/credentials.set?x=1 漏判成非特权，症状是那个接口又开始 403。"""
+        block = self.text[self.text.index("map $request_uri $dsh_priv_loopback"):]
+        block = block[:block.index("}")]
+        for line in block.splitlines():
+            line = line.strip()
+            if line.startswith("~") and line.endswith("$ 1;"):
+                self.fail(f"锚点没考虑查询串: {line}")
+
+    def test_loopback_rewrite_targets_are_loopback(self):
+        for var in ("$dsh_fwd_host", "$dsh_fwd_origin"):
+            self.assertIn(f"map $dsh_priv_loopback {var}", self.text)
+        self.assertIn('1       "127.0.0.1"', self.text)
+        self.assertIn('1       "https://127.0.0.1"', self.text)
+
+
+class NginxUnauthenticatedPathTest(unittest.TestCase):
+    """/manifest.webmanifest 是整站唯一不过 Authelia 的路径，必须卡死。"""
+
+    CONF = REPO / "nginx" / "conf" / "sites" / "dsh-auth.conf"
+
+    def setUp(self):
+        text = self.CONF.read_text(encoding="utf-8")
+        i = text.index("location = /manifest.webmanifest")
+        # 按花括号配平取整块 —— 里面嵌了 limit_except { }，取第一个 } 会截断
+        depth, j = 0, i
+        while j < len(text):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        self.block = text[i:j + 1]
+
+    def test_still_the_only_unauthenticated_location(self):
+        """再多一条免认证路径就要重新评估，不能悄悄增加。"""
+        text = self.CONF.read_text(encoding="utf-8")
+        locs = [l.strip() for l in text.splitlines() if l.strip().startswith("location ")]
+        authed = text.count("auth_request /internal/authelia/authz;")
+        # location 总数减去内部 authz 子请求与 301 跳转，其余都应带 auth_request
+        self.assertGreaterEqual(authed, 3, f"认证覆盖变少了: {locs}")
+
+    def test_get_only(self):
+        self.assertIn("limit_except GET", self.block,
+                      "免认证路径不该能改状态")
+
+    def test_does_not_forward_session_cookie(self):
+        self.assertIn('proxy_set_header Cookie ""', self.block,
+                      "免认证路径没有任何理由拿到会话凭据")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
