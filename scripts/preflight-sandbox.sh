@@ -168,11 +168,24 @@ if [ -n "$CANARY" ]; then
 fi
 if [ -d /dev/shm ]; then
   SHM_CANARY="/dev/shm/.preflight-canary-shm"
-  echo "CANARY-PEER-SHM" > "$SHM_CANARY" 2>/dev/null || SHM_CANARY=""
+  # 【必须 0600】这个 canary 代表的是「同僚员工自己的私有文件」。
+  # 默认 umask 下它是 0644，那模拟的是「全世界可读的文件」，不是同僚的私有文件：
+  # uid 档里员工各有各的 uid，本来就读不到同僚的 0600 文件，用 0644 会把
+  # 那一档误判成泄露。同 uid 的档（landlock/bwrap）则不受 0600 影响——
+  # 同一个 uid 读得到，正好是这条探针要问的问题。
+  if echo "CANARY-PEER-SHM" > "$SHM_CANARY" 2>/dev/null; then
+    chmod 600 "$SHM_CANARY" 2>/dev/null || true
+  else
+    SHM_CANARY=""
+  fi
 fi
 if [ -d "/run/user/$(id -u)" ]; then
   RUN_CANARY="/run/user/$(id -u)/.preflight-canary-run"
-  echo "CANARY-PEER-RUN" > "$RUN_CANARY" 2>/dev/null || RUN_CANARY=""
+  if echo "CANARY-PEER-RUN" > "$RUN_CANARY" 2>/dev/null; then
+    chmod 600 "$RUN_CANARY" 2>/dev/null || true   # 同上：代表同僚的私有文件
+  else
+    RUN_CANARY=""
+  fi
 fi
 
 PROBE_ERR="$HOME_DIR/.preflight-probe.err"

@@ -100,7 +100,8 @@ jobs:
         # 这一步同时也是 preflight 脚本自身的冒烟测试：它有 bash 错误就会在这里暴露。
         run: |
           set -o pipefail   # 否则 preflight 失败会被 tee 的成功退出码吞掉，job 假绿
-          DSH_ROOT="$HOME/fakedeploy" "$HOME/fakedeploy/scripts/preflight-sandbox.sh" zhangsan \
+          # 同上：bwrap 关掉 netns 就够不着「同僚端口连不上」这条要求
+          DSH_NETNS=1 DSH_ROOT="$HOME/fakedeploy" "$HOME/fakedeploy/scripts/preflight-sandbox.sh" zhangsan \
             | tee "$RUNNER_TEMP/preflight.txt"
           echo '### 隔离验收结果' >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -374,6 +375,7 @@ jobs:
             need_image: 'no'
             dind: 'no'
             isolation: 'auto'
+            netns: '0'
           - shape: 容器·非root·连Landlock也没有（必须拒绝启动）
             expect: refuse
             args: ''
@@ -384,6 +386,7 @@ jobs:
             # 候选里刻意不含 container/landlock：验的是「一档都不成立时
             # 到底拒不拒绝」，带上还活着的档就验不到 fail-closed 了
             isolation: 'bwrap uid none'
+            netns: '0'
           - shape: 容器·root·无命名空间·无docker
             expect: uid
             # --cap-add NET_ADMIN：uid 档要靠 netfilter 的 owner 匹配封住
@@ -397,6 +400,7 @@ jobs:
             # 钉死 uid：auto 现在会优先挑 landlock（那是对的，它更强），
             # 但 uid 档本身也要有人验
             isolation: 'uid'
+            netns: '0'
           - shape: 容器·非root·无命名空间·挂了宿主docker-socket
             expect: container
             args: '-v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker:ro'
@@ -405,6 +409,7 @@ jobs:
             need_image: 'yes'
             dind: 'no'
             isolation: 'auto'
+            netns: '0'
           - shape: 容器·root·特权
             expect: bwrap
             args: '--privileged'
@@ -413,6 +418,11 @@ jobs:
             need_image: 'no'
             dind: 'no'
             isolation: 'auto'
+            # bwrap 默认与宿主共享网络，同僚的实例端口连得到 —— 那条路不经过
+            # 文件系统，等于「个体不能访问其他空间的数据」这条要求没达成。
+            # 所以这里测的是【合规配置】：开 netns。关掉 netns 的 bwrap 本就
+            # 不满足要求，让 CI 绿着才是骗自己。
+            netns: '1'
           - shape: 容器·特权·容器内自跑dockerd（真嵌套）
             expect: container
             # --cgroupns=private：给这个容器一个自己的 cgroup 根，
@@ -423,6 +433,7 @@ jobs:
             need_image: 'no'
             dind: 'yes'
             isolation: 'auto'
+            netns: '0'
           - shape: 容器·非root·只有Landlock可用
             expect: landlock
             args: ''
@@ -431,6 +442,7 @@ jobs:
             need_image: 'no'
             dind: 'no'
             isolation: 'landlock'
+            netns: '0'
     steps:
       - uses: actions/checkout@v4
 
@@ -465,7 +477,7 @@ jobs:
           cat > "$RUNNER_TEMP/Dockerfile.shape" <<'DOCKERFILE'
           FROM ubuntu:24.04
           RUN apt-get update && apt-get install -y --no-install-recommends \
-                bash python3 bubblewrap socat curl iproute2 acl iptables \
+                bash python3 bubblewrap socat curl iproute2 acl iptables passt \
                 passwd util-linux findutils coreutils ca-certificates \
            && rm -rf /var/lib/apt/lists/*
           DOCKERFILE
@@ -513,6 +525,7 @@ jobs:
             -e "SHAPE_BLOCK_USERNS=${{ matrix.block_userns }}" \
             -e "SHAPE_START_DOCKERD=$START_DOCKERD" \
             -e "DSH_ISOLATION=${{ matrix.isolation }}" \
+            -e "DSH_NETNS=${{ matrix.netns }}" \
             $ARGS \
             "$IMAGE" \
             bash /deploy/tests/env-shape.sh "${{ matrix.expect }}" /deploy/fakedeploy \

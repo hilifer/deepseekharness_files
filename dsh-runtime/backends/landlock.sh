@@ -48,6 +48,10 @@ LANDLOCK_EXEC="$DSH_ROOT/dsh-runtime/dsh-landlock-exec.py"
 # 【不要】把 13100-13199 加进来——那等于把「员工 A 连员工 B 的实例」这条
 # 本档好不容易封住的路重新打开。
 DSH_LANDLOCK_CONNECT_PORTS="${DSH_LANDLOCK_CONNECT_PORTS:-443 80 22}"
+# 放行的设备节点。逐个给，【不能】给整个 /dev —— Landlock 层级继承会把
+# /dev/shm 连带放开，同 uid 的同僚就能在那里互相留料、互相读。
+# 缺哪个节点导致程序起不来时往这里加，不要图省事改回 /dev。
+DSH_LANDLOCK_DEV_NODES="${DSH_LANDLOCK_DEV_NODES:-/dev/null /dev/zero /dev/full /dev/random /dev/urandom /dev/tty /dev/ptmx /dev/pts}"
 
 python_bin() { command -v python3 2>/dev/null || true; }
 
@@ -128,9 +132,17 @@ backend_run() {
   for d in /usr /bin /sbin /lib /lib64 /lib32 /libx32 /etc /opt; do
     [ -e "$d" ] && args+=(--ro "$d")
   done
-  # /proc 与 /dev 要能读写（/dev/null、/dev/urandom、/proc/self/...），
-  # 但用 rwio 而不是 rw：不给创建/删除权限。
-  for d in /proc /dev; do
+  # /proc 要能读写（/proc/self/...）。用 rwio 而不是 rw：不给创建/删除权限。
+  # 注意 /proc 整给出去意味着同 uid 的同僚进程信息可见——本档没有 pid ns，
+  # 这是已知边界，见文件头。
+  [ -e /proc ] && args+=(--rwio /proc)
+  # 【不要整个放行 /dev】Landlock 规则是【层级继承】的：给了 /dev 就等于把
+  # /dev/shm 一并给了，而本档所有实例同一个 uid，那就是一块共享读写区。
+  # 早先这里写 --rwio /dev，同时又在下面单独放行「私有 shm 子目录」——
+  # 后者完全是多余的，父级授权早就把整个 /dev/shm 打开了。CI 的同 uid 旁路
+  # 探针把这一条照了出来（/dev/shm 中同僚留下的文件 可读）。
+  # 所以逐个给真正需要的设备节点，不给目录树。
+  for d in $DSH_LANDLOCK_DEV_NODES; do
     [ -e "$d" ] && args+=(--rwio "$d")
   done
   # /dev/shm 与 /run/user/UID 要能写（node 与一些工具依赖），但【不能整个放行】：
