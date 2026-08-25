@@ -560,7 +560,11 @@ class SandboxFailClosedTest(unittest.TestCase):
                                    "DSH_ALLOW_UNCONFINED": "1",
                                    "DSH_NODE_BIN": "/bin/echo", "DSH_BIN": "DSH",
                                    "DSH_TRUSTED_HOSTS": "a:1 b:2 c:3"})
-            self.assertEqual(res.stdout.count("--trusted-host"), 3, res.stdout)
+            # 显式配置的三个必须一个不落地传下去。总数不再断言为 3——
+            # common.sh 会把本机真实拥有的名字与地址也补进来（防的是「换个
+            # 地址访问就 403」），那部分随机器而变，钉死数量等于钉死机器。
+            for h in ("a:1", "b:2", "c:3"):
+                self.assertIn(f"--trusted-host {h}", res.stdout, res.stdout)
             for h in ("a:1", "b:2", "c:3"):
                 self.assertIn(h, res.stdout)
 
@@ -815,6 +819,60 @@ class UidFirewallRulesTest(unittest.TestCase):
         res, _ = self._run(stub, "fw_assert_sealed %s" % self.UID)
         self.assertNotEqual(res.returncode, 0, "规则不在却放行了启动")
         self.assertIn("拒绝启动", res.stderr, res.stderr[-500:])
+
+
+class TrustedHostAutodetectTest(unittest.TestCase):
+    """dsh 对 API 调用做 Host/Origin 校验：地址栏里的 host:port 不在名单里时，
+    【静态页照发、API 一律 403】。现象是界面能开、设置面板里模型/权限/预设
+    三处全挂——报错只有 HTTP 403，完全指不到成因上。
+
+    名单原本写死三个地址，换台机器、换张网卡、改用主机名访问就复现。
+    所以本机真实拥有的名字与地址要自动补进去。
+    """
+
+    def _hosts(self, env: dict) -> list:
+        script = (
+            'DSH_ROOT=/tmp BACKEND_TAG=t . "%s/dsh-runtime/backends/common.sh"\n'
+            'build_trusted_host_args\n'
+            'printf "%%s\\n" "${HOST_ARGS[@]}"\n' % REPO)
+        res = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                             timeout=30, env={**os.environ, **env})
+        self.assertEqual(res.returncode, 0, res.stderr)
+        out = res.stdout.split()
+        return [out[i + 1] for i, t in enumerate(out) if t == "--trusted-host"]
+
+    def test_explicit_hosts_are_kept(self):
+        hosts = self._hosts({"DSH_TRUSTED_HOSTS": "a:1 b:2"})
+        for h in ("a:1", "b:2"):
+            self.assertIn(h, hosts)
+
+    def test_loopback_is_always_present(self):
+        """浏览器用 localhost 访问是最常见的一种，写死名单里恰恰没有它。"""
+        hosts = self._hosts({"DSH_TRUSTED_HOSTS": "a:1", "DSH_ENTRY_PORT": "8099"})
+        self.assertIn("localhost:8099", hosts)
+        self.assertIn("127.0.0.1:8099", hosts)
+
+    def test_entry_port_is_honoured(self):
+        hosts = self._hosts({"DSH_TRUSTED_HOSTS": "", "DSH_ENTRY_PORT": "9443"})
+        self.assertIn("localhost:9443", hosts)
+        self.assertTrue(all(h.endswith(":9443") for h in hosts), hosts)
+
+    def test_no_duplicates(self):
+        """dsh 收得下重复项，但日志会很脏，且掩盖名单到底有什么。"""
+        hosts = self._hosts({"DSH_TRUSTED_HOSTS": "localhost:8099 localhost:8099",
+                             "DSH_ENTRY_PORT": "8099"})
+        self.assertEqual(len(hosts), len(set(hosts)), hosts)
+
+    def test_autodetect_can_be_turned_off(self):
+        hosts = self._hosts({"DSH_TRUSTED_HOSTS": "a:1", "DSH_TRUSTED_AUTODETECT": "0"})
+        self.assertEqual(hosts, ["a:1"])
+
+    def test_never_emits_a_wildcard(self):
+        """自动补的都必须是本机【真实拥有】的地址。通配符/全零地址会把
+        Host 校验变成摆设——那是真放宽，不是修 bug。"""
+        hosts = self._hosts({"DSH_TRUSTED_HOSTS": ""})
+        for bad in ("*", "0.0.0.0", "::", "*:8099", "0.0.0.0:8099"):
+            self.assertNotIn(bad, hosts, hosts)
 
 
 if __name__ == "__main__":

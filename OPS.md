@@ -418,3 +418,40 @@ python3 /home/ubuntu/admin/cli.py sync-nginx     # upstream 换成 unix socket
 /home/ubuntu/dsh-runtime/start-all.sh
 ```
 确保所有服务（dsh/authelia/nginx/filebrowser + 每用户 dsh 实例）幂等启动。
+
+## 界面能打开，但设置里模型/权限/预设全部加载失败（HTTP 403）
+
+现象：dsh 页面正常渲染，设置面板里三处下拉都显示
+`transport failure for /api/settings.describe: HTTP 403`。
+
+这不是服务坏了，也不是路由问题。这套部署里 403 只有两个来源，现象可区分：
+
+| 来源 | 现象 |
+|------|------|
+| 黑洞 `127.0.0.1:13100`（`map $user` 未匹配） | **整个界面都打不开** |
+| dsh 实例自己拒绝（Host/Origin 校验） | **页面正常，只有 API 403** |
+
+第二种的判据是 `--trusted-host`：**浏览器地址栏里的 host:port 不在名单里时，
+静态页照发、API 一律 403**。报错只有一个 403，完全指不到成因上。
+
+名单现在由两部分合成（`backends/common.sh`）：
+
+- `DSH_TRUSTED_HOSTS` 显式配置的
+- 本机**真实拥有**的名字与地址自动补齐（`hostname` / `hostname -f` /
+  `hostname -I` 的每个 IP / localhost / 127.0.0.1），各配一份 `DSH_ENTRY_PORT`
+  （默认 8099）
+
+所以「换台机器、换张网卡、改用主机名访问」不再会撞上这个。仍然撞上的话：
+
+```bash
+bash scripts/diag-403.sh admin      # 员工账号就把 admin 换成用户名
+```
+
+它会打出实例进程**实际**带了哪些 `--trusted-host`，并绕开 nginx 直连实例、
+逐个 Host 试同一个接口，看哪个被接受。
+
+入口端口不是 8099 时要一并告诉它：`DSH_ENTRY_PORT=9443`。
+
+**不要**为了图省事往名单里加通配符或 `0.0.0.0` —— 那会把 Host 校验变成摆设，
+是真的放宽了安全边界，而不是修 bug。自动补进去的都是这台机器自己的地址，
+防的是跨站与 DNS 重绑定，不是防本机。

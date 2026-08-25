@@ -11,10 +11,38 @@ NODE_BIN="${DSH_NODE_BIN:-$NODE_ROOT/bin/node}"
 DSH_BIN="${DSH_BIN:-$NODE_ROOT/bin/dsh}"
 SHARED_PROFILES="${DSH_SHARED_PROFILES:-$DSH_ROOT/.local/share/dsh/profiles}"
 
-# dsh 的 --trusted-host，三个入口域全填（见 OPS.md）。
-# 公网 IP 是云 NAT，不绑在本机网卡上，只填它的话本机与局域网访问会被
-# dsh 的 Host 校验一律拒绝。现场实测已确认 dsh 接受重复的 --trusted-host。
-DSH_TRUSTED_HOSTS="${DSH_TRUSTED_HOSTS:-218.17.143.249:8099 192.168.1.225:8099 127.0.0.1:8099}"
+# dsh 的 --trusted-host。dsh 对 API 调用做 Host/Origin 校验：浏览器地址栏里的
+# host:port 不在这份名单里时，【静态页照发、API 一律 403】——现象是界面能打开、
+# 设置面板里模型/权限/Agent 预设三处全部加载失败，很容易被误判成服务坏了。
+#
+# 这里原本写死三个地址。写死的毛病是换台机器、换张网卡、或改用主机名访问就复现，
+# 而报错信息（HTTP 403）完全指不到这个原因上。所以改成：显式配置的 + 本机自己
+# 【真实拥有】的所有名字与地址，各配一份入口端口。
+#
+# 这不是放宽校验：加进去的都是这台机器自己的地址，防的是跨站/DNS 重绑定，
+# 不是防本机。【不要】加通配符或 0.0.0.0，那才是真放宽。
+#
+# 用 ${DSH_TRUSTED_HOSTS-默认} 而不是 :- ：显式传空串要能表达「只要自动探测的」。
+# 写成 :- 的话空串会被当成没设，那三个写死的（还带着 :8099）照样灌进来——
+# 运维改过入口端口时，那就是一组静默生效的错名单。
+DSH_ENTRY_PORT="${DSH_ENTRY_PORT:-8099}"
+DSH_TRUSTED_HOSTS="${DSH_TRUSTED_HOSTS-218.17.143.249:8099 192.168.1.225:8099 127.0.0.1:8099}"
+DSH_TRUSTED_AUTODETECT="${DSH_TRUSTED_AUTODETECT:-1}"
+
+# 本机真实拥有的名字与地址，各配一份入口端口
+autodetect_trusted_hosts() {
+  [ "$DSH_TRUSTED_AUTODETECT" = "1" ] || return 0
+  local n ip
+  printf '%s\n' "localhost:$DSH_ENTRY_PORT" "127.0.0.1:$DSH_ENTRY_PORT"
+  for n in "$(hostname 2>/dev/null)" "$(hostname -f 2>/dev/null)"; do
+    [ -n "$n" ] && printf '%s\n' "$n:$DSH_ENTRY_PORT"
+  done
+  # hostname -I 列出本机所有已配置的 IP（IPv6 里带 % 的链路本地地址跳过）
+  for ip in $(hostname -I 2>/dev/null); do
+    case "$ip" in *%*) continue ;; esac
+    printf '%s\n' "$ip:$DSH_ENTRY_PORT"
+  done
+}
 
 # 实例端口段与本机内部服务端口。uid 档要靠它们做网络封锁：
 # 「A 直连 B 的实例端口驱动 B 的 agent」这条路不经过文件系统，DAC 拦不住。
@@ -178,8 +206,14 @@ build_instance_env() { # $1=username $2=dsh_home $3=workspace $4=allowed_roots
 # 输出到全局 HOST_ARGS[]
 build_trusted_host_args() {
   HOST_ARGS=()
-  local h
-  for h in $DSH_TRUSTED_HOSTS; do HOST_ARGS+=(--trusted-host "$h"); done
+  local h seen=""
+  # 显式配置的排在前面，自动探测的补在后面；去重（dsh 接受重复项，但日志会很脏）
+  for h in $DSH_TRUSTED_HOSTS $(autodetect_trusted_hosts); do
+    [ -n "$h" ] || continue
+    case "$seen" in *"|$h|"*) continue ;; esac
+    seen="$seen|$h|"
+    HOST_ARGS+=(--trusted-host "$h")
+  done
 }
 
 # ---------- 资源限额（非 container 档）----------
