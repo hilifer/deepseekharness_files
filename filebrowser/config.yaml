@@ -30,7 +30,15 @@ auth:
       # 能连上 127.0.0.1:18080；若沿用固定的 X-Forwarded-User，任何员工都能在自己的
       # dsh 里 curl 伪造 admin 身份直调本 API 读写全公司文件，文件系统隔离等于白做。
       # 沙箱内看不到本文件，因而拿不到头名。首次部署跑一次 init-secrets.sh 即可。
-      header: "X-Fb-Auth-69ee0f8989442f3e495843c46207e0cc"
+      # 【占位值，真值不进仓库】这个头名本身就是共享密钥：它证明请求经由 nginx
+      # 而来。真值一旦进仓库，任何拿得到代码的人都能对 FileBrowser 直接发
+      #     X-Fb-Auth-<真值>: admin
+      # 拿到全公司文件读写权，preflight 里「伪造 admin 被拒」那一项也就白验了。
+      #
+      # 真值由 scripts/init-secrets.sh 生成，并【就地改写本文件】——所以部署机上
+      # 这个文件本来就是脏的，git pull 会打架。那正是它一度被提交进来的原因。
+      # 现在不用再提交了：fb-start.sh 每次启动会先补齐真值，补不上就【拒绝启动】。
+      header: "X-Fb-Auth-REPLACE_ME"
       createUser: false
     password:
       enabled: false
