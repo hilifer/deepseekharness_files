@@ -22,11 +22,22 @@
 #
 # 选择顺序（强 -> 弱），DSH_ISOLATION 可以强制指定某一档：
 #   1 container  独立容器：mount/net/pid/user ns + cgroup 限额，全套
-#   2 bwrap      挂载命名空间：文件系统隔离足够强，网络默认与宿主共享
-#                （DSH_NETNS=1 可补上独立 netns）
-#   3 landlock   内核的非特权自我沙箱：文件系统 + TCP 端口 + 信号隔离。
-#                【不需要 root、不需要 userns、不需要任何人配合】——
-#                前两档在受限容器里全断时，这一档往往还活着
+#   2 landlock   内核的非特权自我沙箱：文件系统 + TCP 端口 + 信号隔离。
+#                【不需要 root、不需要 userns、不需要任何人配合】。
+#   3 bwrap      挂载命名空间：文件维度比 landlock 强（越界是「不存在」而非
+#                「拒绝访问」，还带 pid ns），但【封不住同僚的实例端口】。
+#
+# 为什么 landlock 排在 bwrap 前面（CI 实测得出，不是设计偏好）：
+#   bwrap 默认与宿主共享网络；开 DSH_NETNS=1 用 pasta 建独立 netns 之后，
+#   实测命名空间确实换了（ns id 不同、只有 lo+eth0），但 pasta 的设计目的
+#   就是把宿主的网络连通性带进命名空间——宿主回环也在其中，于是员工 A
+#   仍然连得到员工 B 的实例端口，驱动 B 的 agent 读 B 的工作区。
+#   --no-splice 改不了这一点（试过，CI 证伪）。
+#   这条路不经过文件系统，等于「个体不能访问其他空间的数据」没达成；
+#   而 landlock 用 TCP 连接端口白名单把它封死了。
+#   代价如实记：landlock 越界是 EACCES 会泄露路径存在性，且没有 pid ns。
+#   两害相权，「数据读不到」优先于「路径名猜不到」。
+#   内核 <5.13 没有 landlock 时，bwrap 仍是次优选择。
 #   4 uid        独立 OS 用户 + DAC：只有文件维度，无 ns
 #   5 none       无隔离，必须 DSH_ALLOW_UNCONFINED=1 显式放行，仅供排障
 #
@@ -39,7 +50,7 @@ BACKEND_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/backends"
 # 强制指定后端：auto（默认）| container | bwrap | uid | none
 DSH_ISOLATION="${DSH_ISOLATION:-auto}"
 # 自动挑选时的顺序，按隔离强度从强到弱
-AUTO_ORDER="container bwrap landlock uid none"
+AUTO_ORDER="container landlock bwrap uid none"
 
 log() { echo "[isolate] $*" >&2; }
 

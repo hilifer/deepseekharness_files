@@ -722,7 +722,20 @@ class AutoOrderTest(unittest.TestCase):
         return line.split("=", 1)[1].strip().strip('"').split()
 
     def test_order_is_strongest_first(self):
-        self.assertEqual(self._order(), ["container", "bwrap", "landlock", "uid", "none"])
+        self.assertEqual(self._order(), ["container", "landlock", "bwrap", "uid", "none"])
+
+    def test_landlock_before_bwrap(self):
+        """landlock 必须排在 bwrap 前面 —— CI 实测得出的结论。
+
+        bwrap 开了 DSH_NETNS=1 之后命名空间确实换了（实测 ns id 不同、
+        只有 lo+eth0），但 pasta 的设计目的就是把宿主网络连通性带进命名空间，
+        宿主回环也在其中，于是同僚的实例端口仍然连得到 —— 员工 A 能驱动
+        员工 B 的 agent 读 B 的工作区。--no-splice 改不了（试过，CI 证伪）。
+        landlock 用 TCP 连接端口白名单把这条路封死了。
+        """
+        o = self._order()
+        self.assertLess(o.index("landlock"), o.index("bwrap"),
+                        "bwrap 封不住同僚实例端口，不能排在 landlock 之前")
 
     def test_landlock_before_uid(self):
         o = self._order()
