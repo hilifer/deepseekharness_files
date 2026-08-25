@@ -112,6 +112,14 @@ if [ -n "${P_PEER_PORT:-}" ]; then
 else
   echo "PEERDSH=none"
 fi
+# 网络命名空间的【真实身份】。此前判断 netns 是否生效全靠回显环境变量，
+# 那只能说明「请求过」，不能说明「套上了」。这三项是实测：
+#   NETNS  与宿主一致 => 命名空间根本没换，同僚端口当然连得到
+#   NETIF  netns 里通常只有 lo（+pasta 的 tap），宿主上会有一堆
+#   LISTEN 独立 netns 里监听数应当很少
+echo "NETNS=$(readlink /proc/self/ns/net 2>/dev/null || echo unknown)"
+echo "NETIF=$(ip -o link show 2>/dev/null | awk -F': ' '{printf "%s ", $2}' || echo unknown)"
+echo "LISTEN=$(ss -ltn 2>/dev/null | tail -n +2 | wc -l)"
 PROBE
 
 PEER_PORT=$(python3 - "$DSH_ROOT" "$USERNAME" <<'PY' 2>/dev/null
@@ -187,6 +195,8 @@ if [ -d "/run/user/$(id -u)" ]; then
     RUN_CANARY=""
   fi
 fi
+
+HOST_NETNS=$(readlink /proc/self/ns/net 2>/dev/null || echo unknown)
 
 PROBE_ERR="$HOME_DIR/.preflight-probe.err"
 RES=$(DSH_ROOT="$DSH_ROOT" DSH_NODE_BIN=/bin/bash DSH_BIN="$HOME_DIR/.preflight-probe.sh" \
@@ -331,12 +341,24 @@ case "$AD" in
   000) info "管理后台 API" "连不上（服务没起，或已被 uid 档的 netfilter 规则挡住）" ;;
   *)   info "管理后台 API" "HTTP $AD" ;;
 esac
+SB_NETNS=$(g NETNS)
+if [ -n "$SB_NETNS" ] && [ "$SB_NETNS" != "unknown" ]; then
+  if [ "$SB_NETNS" = "$HOST_NETNS" ]; then
+    info "网络命名空间" "与宿主【相同】($SB_NETNS) —— 没有独立 netns"
+  else
+    ok "网络命名空间" "与宿主不同（沙箱 $SB_NETNS / 宿主 $HOST_NETNS）"
+  fi
+  info "  沙箱内网卡" "$(g NETIF)"
+  info "  沙箱内监听数" "$(g LISTEN)"
+fi
 PD=$(g PEERDSH)
 PEER_SRC=$([ -n "$PEER_STUB_PID" ] && echo "桩监听器" || echo "真实例")
 case "$PD" in
   none) info "其他员工的 dsh 实例" "（登记表里没有第二个员工，无端口可测）" ;;
   000)  ok "其他员工的 dsh 实例" "端口 $PEER_PORT 上有人监听（$PEER_SRC），仍连不上 —— 确实被挡住了" ;;
-  *)    bad "其他员工的 dsh 实例" "HTTP $PD 可达 —— 可驱动他人的 agent 读写其工作区。
+  *)    bad "其他员工的 dsh 实例" "HTTP $PD 可达（上方「网络命名空间」一项即根因线索：
+       与宿主相同 = 命名空间没套上；不同 = 套上了但 pasta 仍把宿主回环带了进来）
+       可驱动他人的 agent 读写其工作区。
        这条路不经过文件系统，DAC 拦不住：修复要么换 container 后端（天然独立 netns），
        要么 bwrap 后端开 DSH_NETNS=1，要么走 landlock / uid 档（端口白名单 / netfilter）" ;;
 esac
