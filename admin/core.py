@@ -747,10 +747,14 @@ class Engine:
         (dsh_home / "storages").mkdir(parents=True, exist_ok=True)
         profiles = dsh_home / "profiles"
         if not profiles.exists() and self.cfg.shared_profiles.exists():
+            # 优先独立副本而非软链：landlock/bwrap 档把共享目录设为只读（防篡改
+            # 他人插件），而 dsh 启动时要写自己的 profiles/web/cordis.yml，
+            # 软链会把这次写引到共享目录上直接 EACCES。副本让每实例可写自己
+            # 的、天然隔离；代价是共享插件更新后需对老用户重刷一次。
             try:
-                profiles.symlink_to(self.cfg.shared_profiles)
-            except OSError:
                 shutil.copytree(self.cfg.shared_profiles, profiles)
+            except OSError:
+                profiles.symlink_to(self.cfg.shared_profiles)
         ws_file = dsh_home / "storages" / "workspace.json"
         if not ws_file.exists():
             wsid = secrets.token_hex(16)
