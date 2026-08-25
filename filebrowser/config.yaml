@@ -30,6 +30,11 @@ auth:
       # 能连上 127.0.0.1:18080；若沿用固定的 X-Forwarded-User，任何员工都能在自己的
       # dsh 里 curl 伪造 admin 身份直调本 API 读写全公司文件，文件系统隔离等于白做。
       # 沙箱内看不到本文件，因而拿不到头名。首次部署跑一次 init-secrets.sh 即可。
+      # 【不要把真实值提交进仓库】这个头名本身就是共享密钥：它证明请求经由
+      # nginx 而来。知道它的人可以直接对 FileBrowser 发
+      #     X-Fb-Auth-<真实值>: admin
+      # 拿到全公司文件的读写权，preflight 里「伪造 admin 被拒」那一项也就白验了。
+      # 真实值由 scripts/init-secrets.sh 生成并【只写在部署机上】。
       header: "X-Forwarded-User"
       createUser: false
     password:

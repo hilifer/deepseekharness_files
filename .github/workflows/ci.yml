@@ -194,6 +194,18 @@ jobs:
           if git grep -nE -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' -- . ':!*.yml'; then
             echo "::error::仓库里有私钥"; fail=1
           fi
+          # FileBrowser 的代理认证头。这个头【名字本身就是共享密钥】——
+          # 它证明请求经由 nginx 而来。真实值一旦进仓库，任何人都能直接对
+          # FileBrowser 发 "X-Fb-Auth-<真值>: admin" 拿到全公司文件读写权，
+          # 而 preflight 里「伪造 admin 被拒」那一项也就白验了。
+          # 真实值是 token_hex(16)=32 位十六进制；tests/ 里的 deadbeef 占位不算。
+          if git grep -nE 'X-Fb-Auth-[0-9a-f]{32}' -- . ':!tests/*'; then
+            echo "::error::仓库里有真实的 FileBrowser 代理认证头（跑 scripts/init-secrets.sh 轮换，并从配置里改回占位）"; fail=1
+          fi
+          # 管理后台 token：token_hex(32)=64 位十六进制
+          if git grep -nE 'X-Admin-Token "?[0-9a-f]{64}' -- . ':!tests/*'; then
+            echo "::error::仓库里有真实的管理后台 token"; fail=1
+          fi
           # 真实 argon2 哈希（.example 模板里的 REPLACE_ME 占位不算）
           if git grep -nE '\$argon2id\$v=19\$m=[0-9]+,t=[0-9]+,p=[0-9]+\$[A-Za-z0-9+/]{16,}' \
              -- . ':!*.example.yml' ':!tests/*'; then
