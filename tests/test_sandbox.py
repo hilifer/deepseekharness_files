@@ -42,7 +42,8 @@ def _pasta_works() -> bool:
         return False
     try:
         return subprocess.run(
-            ["pasta", "--config-net", "--no-map-gw", "-t", "none", "-u", "none", "--", "true"],
+            ["pasta", "--config-net", "--no-map-gw", "--no-splice",
+             "-t", "none", "-u", "none", "--", "true"],
             capture_output=True, timeout=30).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
@@ -1029,6 +1030,41 @@ class LandlockAccessMaskTest(unittest.TestCase):
         不能拿 0 去 add_rule（空访问位同样 EINVAL）。"""
         self.assertEqual(
             self.ll.effective_access(self.ll.FS["read_dir"], False), 0)
+
+
+class PastaNoSpliceTest(unittest.TestCase):
+    """--no-splice 是 netns 档【成立的前提】，不是可选优化。
+
+    pasta 默认把命名空间内对 127.0.0.1:PORT 的连接直接 splice 到宿主回环，
+    员工 A 因此照样连得到员工 B 的实例端口——这一档最核心的卖点直接落空。
+    CI 上实测过：不带这个参数时 preflight 报「其他员工的 dsh 实例 HTTP 200 可达」。
+
+    仓库里早有一条「netns 实验二：验证 --no-splice 封回环」的提交，说明当初
+    验过，但参数从没进到真正的调用里。所以这里钉死。
+    """
+
+    SRC = (REPO / "dsh-runtime" / "backends" / "bwrap.sh").read_text(encoding="utf-8")
+
+    def _pasta_lines(self) -> list:
+        return [l.strip() for l in self.SRC.splitlines()
+                if "pasta " in l and "--config-net" in l]
+
+    def test_every_pasta_invocation_has_no_splice(self):
+        lines = self._pasta_lines()
+        self.assertTrue(lines, "没找到 pasta 调用，测试本身失效了")
+        for l in lines:
+            self.assertIn("--no-splice", l, f"这条 pasta 调用会把回环放通: {l}")
+
+    def test_probe_and_run_use_the_same_flags(self):
+        """自检与真正启动的参数必须一致，否则验的不是同一件事——
+        这个仓库反复踩的就是「探测通过、实跑失败」。"""
+        def flags(line):
+            # 排除裸 "--"（命令分隔符，不是参数）
+            return {t for t in line.split() if t.startswith("--") and t != "--"}
+        sets = [flags(l) for l in self._pasta_lines()]
+        for other in sets[1:]:
+            self.assertEqual(sets[0], other,
+                             f"pasta 参数不一致: {sets[0]} vs {other}")
 
 
 if __name__ == "__main__":

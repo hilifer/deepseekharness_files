@@ -95,7 +95,7 @@ userns 通不通、有没有 CAP_SYS_ADMIN、Landlock ABI 多少、docker 够不
 | 越界的表现 | 不存在 | 不存在 | 拒绝访问 | 拒绝访问 | — |
 | 员工之间互不可见 | ✔ | ✔ | ✔ | ✔ | ✘ |
 | 独立 pid ns（ps 看不到别人） | ✔ | ✔ | ✘ | ✘ | ✘ |
-| 连不到别人的实例端口 | ✔ netns | 需 `DSH_NETNS=1` | ✔ TCP 端口白名单（ABI v4+） | ✘ | ✘ |
+| 连不到别人的实例端口 | ✔ netns | 需 `DSH_NETNS=1`（且 pasta 必须带 `--no-splice`，见下） | ✔ TCP 端口白名单（ABI v4+） | ✘ | ✘ |
 | kill 不到别人的进程 | ✔ | ✔ | ✔ scope（ABI v6+） | ✘ | ✘ |
 | 读不到别人进程的 environ/内存 | ✔ pid ns | ✔ pid ns | △ 需 yama≥1（同 uid） | ✔ 异 uid | ✘ |
 | 资源限额（内存/CPU/进程数） | ✔ cgroup | △ RLIMIT | △ RLIMIT | △ RLIMIT | ✘ |
@@ -208,3 +208,17 @@ token、其他部门与同部门同事的文件），读到了就红。不看配
 - TLS 私钥考虑移到容器外由宿主 nginx 持有
 - 保留 FileBrowser 与管理后台的密钥头机制（现网已验证能挡住伪造 admin）
 - `preflight-sandbox.sh` 是唯一判据：**功能全通 ≠ 隔离生效**
+
+### netns 档的一个前提：pasta 必须带 `--no-splice`
+
+pasta **默认会把命名空间内对 `127.0.0.1:PORT` 的连接直接 splice 到宿主回环**。
+不带这个参数，员工 A 照样连得到员工 B 的实例端口——这一档最核心的卖点
+（实例之间互不可达）直接落空，而验收还会显示通过。
+
+为什么以前没发现：`preflight` 的同僚端口探针在【没有第二个实例在跑】时恒绿，
+「连不上」和「那边根本没人听」分不出来。加了桩监听器之后，CI 上立刻实测到
+「其他员工的 dsh 实例 HTTP 200 可达」。
+
+`tests/test_sandbox.py` 的 `PastaNoSpliceTest` 钉住两条：每一处 pasta 调用都要带
+`--no-splice`；probe 自检与真正启动的参数必须完全一致——否则又变成
+「探测通过、实跑失败」，这个仓库已经在这上面栽过好几次。

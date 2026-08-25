@@ -108,7 +108,8 @@ netns_check() {
   # 早先这里只判 command -v，probe 因此放行，实例却在真正启动时才炸——
   # 而那时调度器已经选定 bwrap，降级路径够不着了。这是本仓库反复清理的
   # 那类假绿：判「存在」而不判「能跑」。所以真跑一次。
-  if ! pasta --config-net --no-map-gw -t none -u none -- true >/dev/null 2>&1; then
+  # 参数必须与真正启动时【完全一致】，否则自检验的不是同一件事
+  if ! pasta --config-net --no-map-gw --no-splice -t none -u none -- true >/dev/null 2>&1; then
     echo "PASTA_UNUSABLE"; return 1
   fi
   echo "OK"; return 0
@@ -300,7 +301,12 @@ backend_run() {
   # pasta 建独立 netns 并提供出网；-t none -u none 表示不做任何入站端口转发，
   # 入站只走 unix socket。--no-map-gw 断掉经网关回连宿主的路径。
   # bwrap 在 pasta 的 netns 里用 --share-net（共享的是 pasta 的，不是宿主的）。
-  exec pasta --config-net --no-map-gw -t none -u none \
+  # --no-splice 是这一档【成立的前提】，不是可选优化：
+  # pasta 默认会把命名空间内对 127.0.0.1:PORT 的连接直接 splice 到【宿主回环】，
+  # 于是员工 A 照样连得到员工 B 的实例端口——netns 模式最核心的那个卖点
+  # （实例之间互不可达）直接落空，而 preflight 之前因为没人监听而恒绿。
+  # CI 上实测过：不带这个参数时「其他员工的 dsh 实例 HTTP 200 可达」。
+  exec pasta --config-net --no-map-gw --no-splice -t none -u none \
     --dns-forward "$DSH_DNS_FORWARD" -- \
     "$BWRAP" "${args[@]}" -- bash "$NETNS_ENTRY"
 }
