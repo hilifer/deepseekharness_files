@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import stat
 import struct
 import sys
 
@@ -74,6 +75,21 @@ FS_MASK_BY_ABI = {
     4: 0x7fff,   # ABI4 加的是网络，文件位没变
     5: 0xffff,   # +ioctl_dev
 }
+
+# 【目录专属的访问位】给一个【非目录】加规则时带上这些位，add_rule 直接 EINVAL。
+# 早先所有 --ro/--rw/--rwio 的目标都是目录，这个坑一直没露头；一旦改成逐个
+# 放行设备节点（/dev/null 之类），第一条规则就会失败、实例拒绝启动。
+# 内核对文件和目录认的位不是同一套，这里按实际类型裁一次。
+FS_DIR_ONLY = (FS["read_dir"] | FS["remove_dir"] | FS["remove_file"]
+               | FS["make_char"] | FS["make_dir"] | FS["make_reg"]
+               | FS["make_sock"] | FS["make_fifo"] | FS["make_block"]
+               | FS["make_sym"] | FS["refer"])
+
+
+def effective_access(access: int, is_dir: bool) -> int:
+    """按目标类型裁剪访问位。非目录去掉目录专属位，否则内核回 EINVAL。"""
+    return access if is_dir else (access & ~FS_DIR_ONLY)
+
 
 NET_BIND_TCP = 1 << 0
 NET_CONNECT_TCP = 1 << 1
@@ -143,6 +159,15 @@ def _add_path(ruleset_fd: int, path: str, access: int) -> None:
     except OSError as exc:
         raise RuntimeError(f"打不开 {path}: {exc}") from exc
     try:
+        # 目标是文件还是目录，决定哪些访问位是合法的。用 fd 去 stat，
+        # 避免路径在 open 之后被换掉。
+        try:
+            is_dir = stat.S_ISDIR(os.stat(fd).st_mode)
+        except OSError:
+            is_dir = False
+        access = effective_access(access, is_dir)
+        if access == 0:
+            return   # 裁完什么都不剩（例如对文件只要了 read_dir），加了也是 EINVAL
         # struct landlock_path_beneath_attr 是 packed 的：u64 + s32 = 12 字节。
         # '<' 前缀关掉对齐填充，正好对上。
         attr = struct.pack("<Qi", access, fd)

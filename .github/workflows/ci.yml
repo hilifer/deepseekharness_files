@@ -410,8 +410,12 @@ jobs:
             dind: 'no'
             isolation: 'auto'
             netns: '0'
-          - shape: 容器·root·特权
-            expect: bwrap
+          # 特权 root 容器里 pasta 配不出 uid 映射（Couldn't configure user mappings），
+          # 于是 bwrap 封不住同僚实例端口 -> 按 fail-closed 让位给 landlock。
+          # 验的就是这个让位动作本身：不能因为 bwrap「文件维度更强」就带着
+          # 网络缺口上岗。
+          - shape: 容器·root·特权·pasta不可用（bwrap 应让位）
+            expect: landlock
             args: '--privileged'
             nonroot: 'no'
             block_userns: '0'

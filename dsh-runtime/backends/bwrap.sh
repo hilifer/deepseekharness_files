@@ -103,6 +103,14 @@ netns_check() {
   command -v pasta >/dev/null 2>&1 || missing="$missing pasta(passt)"
   command -v socat >/dev/null 2>&1 || missing="$missing socat"
   [ -z "$missing" ] || { echo "MISSING_DEPS$missing"; return 1; }
+  # 【装了不等于能用】pasta 在嵌套/受限容器里会在 uid 映射那步失败：
+  #   Couldn't configure user mappings / clone: Operation not permitted
+  # 早先这里只判 command -v，probe 因此放行，实例却在真正启动时才炸——
+  # 而那时调度器已经选定 bwrap，降级路径够不着了。这是本仓库反复清理的
+  # 那类假绿：判「存在」而不判「能跑」。所以真跑一次。
+  if ! pasta --config-net --no-map-gw -t none -u none -- true >/dev/null 2>&1; then
+    echo "PASTA_UNUSABLE"; return 1
+  fi
   echo "OK"; return 0
 }
 
@@ -112,7 +120,14 @@ backend_probe() {
     if [ "$DSH_NETNS" = "1" ]; then
       local nout
       if ! nout=$(netns_check); then
-        log "网络隔离模式已请求但依赖缺失 -> $nout（sudo apt-get install -y passt socat）"
+        if [ "$nout" = "PASTA_UNUSABLE" ]; then
+          log "pasta 装了但在本环境跑不起来（多半是嵌套容器里配不出 uid 映射）。"
+          log "  没有独立 netns，本档就封不住「员工 A 直连员工 B 的实例端口」——"
+          log "  那条路不经过文件系统，等于「个体不能访问其他空间的数据」没达成，"
+          log "  所以这里【拒绝选用 bwrap】，让位给能封住它的档（landlock 的 TCP 白名单）。"
+        else
+          log "网络隔离模式已请求但依赖缺失 -> $nout（sudo apt-get install -y passt socat）"
+        fi
         echo "$nout"; return 1
       fi
       echo "OK bwrap=$BWRAP mode=$BWRAP_MODE netns=on"; return 0
