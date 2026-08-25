@@ -39,7 +39,10 @@ autodetect_trusted_hosts() {
   done
   # hostname -I 列出本机所有已配置的 IP（IPv6 里带 % 的链路本地地址跳过）
   for ip in $(hostname -I 2>/dev/null); do
-    case "$ip" in *%*) continue ;; esac
+    # 跳过链路本地(%)与全部 IPv6：裸 IPv6 拼端口不是合法 authority
+    # （dsh 的 assertTrustedAuthority 要求 [x:y]:port 方括号形式），会整单拒绝。
+    # 本方案无 IPv6 入口；将来要支持须写成 "[$ip]:$DSH_ENTRY_PORT"。
+    case "$ip" in *%*|*:*) continue ;; esac
     printf '%s\n' "$ip:$DSH_ENTRY_PORT"
   done
 }
