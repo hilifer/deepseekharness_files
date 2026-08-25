@@ -13,6 +13,15 @@
 # 用户清单来自 dsh-users/registry.json（管理后台维护）。
 # 旧的 ports.json 会在首次读取时自动迁移，之后由 core.py 保持同步。
 # =====================================================================
+DSH_ROOT="${DSH_ROOT:-$HOME}"
+
+# --- zombie reaper: exec-self into init-reaper.py on first run ---------------
+if [ "${_INIT_REAPER:-0}" != "1" ]; then
+  export _INIT_REAPER=1
+  exec python3 "$DSH_ROOT/scripts/init-reaper.py" "$0" "$@"
+fi
+# --- end reaper block --------------------------------------------------------
+
 export PATH="$HOME/node/bin:$PATH"
 DSH_ROOT="${DSH_ROOT:-$HOME}"
 export DSH_ROOT
@@ -55,7 +64,7 @@ start_instance() { # $1=user $2=port $3=dsh_home $4=workspace
     echo "dsh:$user 跳过：工作区不存在 ($ws)"; return 1
   fi
   mkdir -p "$home"
-  setsid nohup "$SANDBOX" "$user" "$port" "$home" "$ws" >> "$home/dsh.log" 2>&1 &
+  python3 "$DSH_ROOT/scripts/reap.py" "$SANDBOX" "$user" "$port" "$home" "$ws" >> "$home/dsh.log" 2>&1 &
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 1
     curl -sf -o /dev/null "http://127.0.0.1:$port/" && { echo "dsh:$user 已启动 (127.0.0.1:$port, ws=$ws)"; return 0; }

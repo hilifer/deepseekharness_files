@@ -43,7 +43,7 @@ start() {
     _wait_dead
   fi
   rm -f "$PIDFILE"
-  setsid nohup "$DSH_ROOT/dsh-auth/authelia" --config "$DSH_ROOT/dsh-auth/config/configuration.yml" > "$LOG" 2>&1 &
+  python3 "$DSH_ROOT/scripts/reap.py" "$DSH_ROOT/dsh-auth/authelia" --config "$DSH_ROOT/dsh-auth/config/configuration.yml" >> "$LOG" 2>&1 &
   echo $! > "$PIDFILE"
   echo "authelia started (pid $(cat "$PIDFILE"))"
 }

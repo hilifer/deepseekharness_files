@@ -14,7 +14,8 @@ start() {
   if ! "$SANDBOX" --check >/dev/null 2>&1; then
     echo "挑不出隔离后端，拒绝启动 admin 实例。逐项原因: $SANDBOX --report"; return 1
   fi
-  setsid nohup "$SANDBOX" admin 3080 "$DSH_ROOT/.local/share/dsh" "$DSH_ROOT/dsh-files" > "$LOG" 2>&1 &
+  rm -f "$PIDFILE"
+  DSH_RLIMIT_NPROC=4096 python3 "$DSH_ROOT/scripts/reap.py" "$SANDBOX" admin 3080 "$DSH_ROOT/.local/share/dsh" "$DSH_ROOT/dsh-files" >> "$LOG" 2>&1 &
   echo $! > "$PIDFILE"
   echo "dsh started (pid $(cat "$PIDFILE"))"
 }

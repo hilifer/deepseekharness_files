@@ -14,7 +14,8 @@ is_up() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 start() {
   if is_up; then echo "admin already running (pid $(cat "$PIDFILE"))"; return 0; fi
   mkdir -p "$(dirname "$LOG")"
-  setsid nohup python3 "$APP" >> "$LOG" 2>&1 &
+  rm -f "$PIDFILE"
+  python3 "$DSH_ROOT/scripts/reap.py" python3 "$APP" >> "$LOG" 2>&1 &
   echo $! > "$PIDFILE"
   for _ in $(seq 1 10); do
     curl -sf -o /dev/null "http://127.0.0.1:$ADMIN_PORT/admin/api/health" && break

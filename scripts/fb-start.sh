@@ -1,5 +1,5 @@
 #!/bin/bash
-# FileBrowser Quantum start/stop/restart (rootless, setsid nohup, idempotent)
+# FileBrowser Quantum start/stop/restart (rootless, exec-based, idempotent)
 DSH_ROOT="${DSH_ROOT:-$HOME}"
 BIN="$DSH_ROOT/filebrowser/filebrowser"
 CONF="$DSH_ROOT/filebrowser/config.yaml"
@@ -47,9 +47,9 @@ start() {
     echo "filebrowser already running (pid $(cat "$PIDFILE"))"; return 0
   fi
   ensure_proxy_header || return 1
-  setsid nohup "$BIN" -c "$CONF" > "$LOG" 2>&1 &
+  rm -f "$PIDFILE"
+  python3 "$DSH_ROOT/scripts/reap.py" "$BIN" -c "$CONF" >> "$LOG" 2>&1 &
   echo $! > "$PIDFILE"
-  # wait up to 10s for the port to open
   for i in $(seq 1 10); do
     if curl -s -o /dev/null http://127.0.0.1:18080/files/ 2>/dev/null; then break; fi
     sleep 1
