@@ -489,3 +489,19 @@ dsh 有一批特权方法（`settings.*`、`credentials.*`、`agentPreset.*`、
 残留风险（已知、暂未处理）：改写把 dsh 对这些方法的 CSRF/DNS 重绑定防线整体摘掉了，
 剩下的兜底是 Authelia 的 `same_site: lax`——它挡住跨站 POST 与子资源 GET，但**挡不住
 顶层 GET 跳转**。若这些方法接受 GET，一条构造好的链接就够。要收紧就确认它们只收 POST。
+
+## 本地全过 ≠ CI 全过（吃过亏，写在这里）
+
+`python3 -m unittest discover -s tests` 只跑单元与接口测试。CI 上真正会红的那几个
+job 跑的是**另一批断言**，本地那条命令一个都碰不到：
+
+| CI job | 跑的是什么 | 本地怎么跑 |
+|--------|-----------|-----------|
+| 隔离验收报告 | `preflight-sandbox.sh`（真去读不该读的东西） | `scripts/make-fake-deploy.sh /tmp/f && DSH_ROOT=/tmp/f /tmp/f/scripts/preflight-sandbox.sh zhangsan` |
+| 环境形状 ×7 | `tests/env-shape.sh`，每个形状一个 docker 容器 | 见 `.github/workflows/ci.yml` 的 `env-matrix`，本机需要 docker |
+| nginx 配置校验 | `nginx -t` + 断言路由生成 | 装 nginx 后照 job 里的步骤 |
+
+改过隔离层、`preflight`、nginx 之后**只跑单测是看不出问题的**。曾经连红多次而
+本地一直报「全过」，就是这个盲点。
+
+判据仍然是那一句：**功能全通 ≠ 隔离生效**。preflight 说了算。
