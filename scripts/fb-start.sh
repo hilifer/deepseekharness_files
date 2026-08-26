@@ -58,7 +58,19 @@ start() {
 }
 
 stop() {
-  if is_up; then kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; echo "filebrowser stopped"; else echo "filebrowser not running"; fi
+  # PID 文件存的是 reap.py wrapper 的 PID，kill wrapper 后子进程（filebrowser）
+  # 可能还活着并持有数据库锁。必须额外 pkill 实际的 filebrowser 进程。
+  if is_up; then
+    local wrapper_pid=$(cat "$PIDFILE")
+    kill "$wrapper_pid" 2>/dev/null
+    # 等 wrapper 退出（它会 SIGTERM 子进程）
+    for i in $(seq 1 5); do kill -0 "$wrapper_pid" 2>/dev/null || break; sleep 0.5; done
+    rm -f "$PIDFILE"
+  fi
+  # 兜底：确保没有残留的 filebrowser 进程持有数据库
+  pkill -f "filebrowser -c $CONF" 2>/dev/null || true
+  sleep 0.5
+  echo "filebrowser stopped"
 }
 
 case "$1" in

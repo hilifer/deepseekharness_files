@@ -605,7 +605,9 @@ class Engine:
         fb_dir = self.cfg.root / "filebrowser"
         fb_start = self.cfg.root / "scripts" / "fb-start.sh"
         self.run.run([str(fb_start), "stop"], timeout=30)
-        time.sleep(1)
+        self.run.run(["pkill", "-f", f"filebrowser -c {fb_dir / 'config.yaml'}"],
+                      timeout=10)
+        time.sleep(2)
         try:
             res = self.run.run(
                 [str(fb_dir / "filebrowser"), "set", "-u",
@@ -620,7 +622,16 @@ class Engine:
                 f"CLI 方式: {(res.stderr or res.stdout).strip()[:200]}")
 
     def _fb_delete(self, username: str) -> None:
-        self._fb("DELETE", f"/api/users?username={username}")
+        users = self._fb_users()
+        match = [u for u in users if u.get("username") == username]
+        if not match:
+            return
+        user_id = match[0].get("id")
+        if user_id is None:
+            raise ProvisionError(f"FileBrowser 用户 {username} 缺少 id 字段")
+        status, body = self._fb("DELETE", f"/api/users?id={user_id}")
+        if status not in (200, 204):
+            raise ProvisionError(f"FileBrowser 删除用户失败 (HTTP {status}): {body[:200]!r}")
 
     # ---------------- nginx ----------------
     _MAP_RE = re.compile(r"(map \$user \$dsh_upstream \{)(.*?)(\n\s*\})", re.S)
@@ -752,7 +763,7 @@ class Engine:
             # 软链会把这次写引到共享目录上直接 EACCES。副本让每实例可写自己
             # 的、天然隔离；代价是共享插件更新后需对老用户重刷一次。
             try:
-                shutil.copytree(self.cfg.shared_profiles, profiles)
+                shutil.copytree(self.cfg.shared_profiles, profiles, symlinks=True)
             except OSError as exc:
                 # 【不要】在这里回落成软链。软链正是本次要修掉的那个形态：
                 # landlock/bwrap 档把共享 profiles 设为只读，dsh 启动时写

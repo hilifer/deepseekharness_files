@@ -25,8 +25,13 @@ start() {
   else echo "admin FAILED to start (see $LOG)"; return 1; fi
 }
 stop() {
-  if is_up; then kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; echo "admin stopped";
-  else echo "admin not running"; fi
+  if is_up; then
+    kill "$(cat "$PIDFILE")" 2>/dev/null
+    rm -f "$PIDFILE"
+  fi
+  pkill -f "python3 $APP" 2>/dev/null || true
+  sleep 0.5
+  echo "admin stopped"
 }
 case "$1" in start) start;; stop) stop;; restart) stop; sleep 1; start;;
   *) echo "usage: $0 start|stop|restart"; exit 1;; esac
