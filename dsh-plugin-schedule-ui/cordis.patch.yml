@@ -1,0 +1,6 @@
+# dsh bundle layer: mount the schedule management UI plugin.
+# The profile's cordis.patch.yml stays the user's own patch layer; this file
+# ships with the package and is applied as a bundle.
+- insert:
+    - id: schedule-ui
+      name: 'dsh-schedule-ui'

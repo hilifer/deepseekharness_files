@@ -358,18 +358,22 @@ sudo scripts/apparmor-allow-userns.sh --sysctl  # 备选：全局关掉该限制
 
 共享 profile 的补丁层 `~/.local/share/dsh/profiles/web/` 由
 `scripts/init-profile.sh` 统一生成，`start-all.sh` 在启动任何 dsh 实例之前
-会先调它（第 0b 步）。它落地两样东西：
+会先调它（第 0b 步）。它落地三样东西：
 
 1. `clamped-picker/index.mjs` —— 目录选择器钳制插件（源码在仓库根
    `dsh-plugin-clamped-picker/index.mjs`，多根 `DSH_ALLOWED_ROOTS` 版本）
 2. `cordis.patch.yml` —— 含「禁用 `-auto` 选择器 + 挂载 clamped-picker」和
    「insert `@deepseek-ai/dsh-schedule` 定时任务」两个补丁条目
+3. `dsh-plugin-schedule-ui` —— 定时任务管理界面（bundle 插件，源码在仓库根
+   `dsh-plugin-schedule-ui/`）。服务端 `index.mjs` 提供 `/schedule-ui/api/*`
+   的增删改查 RPC，客户端 `client.js` 通过 `settings.section` slot 注入
+   设置页里的「定时任务」面板（和 WeChat 面板并列）。
 
 要增删 profile 级插件，改 `init-profile.sh` 里生成 `cordis.patch.yml` 的那段
 heredoc，再重跑脚本 + 重启实例——不要手工编辑运行时的 `cordis.patch.yml`
 （它会被脚本覆盖）。
 
-新增员工时 `_seed_dsh_home` 从共享 profile 复制，自动继承这两个插件，无需
+新增员工时 `_seed_dsh_home` 从共享 profile 复制，自动继承这些插件，无需
 额外操作。
 
 ## 网络面：实例间可达性

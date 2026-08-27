@@ -69,3 +69,34 @@ cat > "$PATCH_FILE" <<EOF
 EOF
 
 echo "cordis.patch.yml 已生成: $PATCH_FILE"
+
+# 3) dsh-schedule-ui 定时任务管理界面（bundle 插件，可 pnpm 安装/卸载）
+SCHEDULE_UI_SRC="$SELF_DIR/../dsh-plugin-schedule-ui"
+SCHEDULE_UI_DEPLOY="$DSH_ROOT/dsh-plugin-schedule-ui"
+if [ -d "$SCHEDULE_UI_SRC" ]; then
+  if [ ! "$SCHEDULE_UI_SRC" -ef "$SCHEDULE_UI_DEPLOY" ]; then
+    mkdir -p "$SCHEDULE_UI_DEPLOY"
+    cp -r "$SCHEDULE_UI_SRC/." "$SCHEDULE_UI_DEPLOY/"
+  fi
+  if [ -f "$PROFILE_DIR/package.json" ]; then
+    export PATH="$DSH_ROOT/node/bin:$PATH"
+    if ! grep -q '"dsh-schedule-ui"' "$PROFILE_DIR/package.json"; then
+      (cd "$PROFILE_DIR" && pnpm add "file:$SCHEDULE_UI_DEPLOY" >/dev/null 2>&1) || \
+        echo "警告: pnpm 安装 dsh-schedule-ui 失败，管理界面可能不可用" >&2
+    fi
+    python3 - "$PROFILE_DIR/package.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+bundles = d.setdefault('dsh', {}).setdefault('profile', {}).setdefault('bundles', [])
+if 'dsh-schedule-ui' not in bundles:
+    bundles.append('dsh-schedule-ui')
+    with open(p, 'w') as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+    print(f"bundles 已加 dsh-schedule-ui: {p}")
+PY
+  fi
+else
+  echo "警告: 找不到 dsh-schedule-ui 源码 $SCHEDULE_UI_SRC，跳过（定时任务管理界面不可用）" >&2
+fi

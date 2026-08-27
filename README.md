@@ -71,6 +71,7 @@
 │       └── sites/dsh-auth.conf         # auth_request + /files/ 代理 + SSE 配置
 ├── filebrowser/config.yaml             # proxy auth / sources / WebDAV
 ├── dsh-plugin-clamped-picker/index.mjs # 目录选择器根目录钳制插件
+├── dsh-plugin-schedule-ui/             # 定时任务管理界面插件（设置页内嵌，含 client.js）
 ├── OPS.md                              # 运维手册（建号/离职/改密/WebDAV/排障）
 ```
 
