@@ -77,7 +77,9 @@ export function apply(ctx) {
     const folded = foldFor(agent);
     const now = Date.now();
     return {
-      tasks: folded.active.map((r) => scheduleView(r, now)),
+      tasks: folded.active
+        .map((r) => scheduleView(r, now))
+        .sort((a, b) => Date.parse(a.scheduledAt) - Date.parse(b.scheduledAt)),
     };
   }
 
