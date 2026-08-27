@@ -39,6 +39,7 @@
 │   ├── configure-root.sh      # 把配置里的部署根改到实际路径（幂等可逆）
 │   ├── apparmor-allow-userns.sh # Ubuntu 24.04+ 放行 bwrap 的 userns 权限
 │   ├── init-secrets.sh        # 生成 nginx 注入的共享密钥（幂等）
+│   ├── init-profile.sh        # 初始化共享 profile 补丁层（clamped-picker 钳制 + 定时任务）
 │   ├── install-bubblewrap.sh  # 无 root 安装 bwrap（解包 deb，同 nginx 的装法）
 │   ├── build-dsh-image.sh     # 构建实例容器镜像（container 档用）
 │   ├── make-fake-deploy.sh    # 搭仿真部署树（CI 各环境形状共用）

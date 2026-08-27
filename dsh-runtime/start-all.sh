@@ -33,6 +33,10 @@ is_up() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 # 0) 生成/校准 nginx 注入的共享密钥（nginx 的 include 依赖这些文件先存在）
 "$DSH_ROOT/scripts/init-secrets.sh" || echo "warning: init-secrets.sh 失败，nginx 可能起不来"
 
+# 0b) 初始化共享 profile 补丁层（clamped-picker 钳制 + dsh-schedule 定时任务）。
+#     必须在启动任何 dsh 实例之前完成，否则新实例不带这两个插件。
+"$DSH_ROOT/scripts/init-profile.sh" || echo "warning: init-profile.sh 失败，dsh 实例可能缺少目录钳制/定时任务"
+
 # 1) 核心服务
 "$DSH_ROOT/dsh-auth/authelia-start.sh" start
 "$DSH_ROOT/nginx/nginx-start.sh" start
