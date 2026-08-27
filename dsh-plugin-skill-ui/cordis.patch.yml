@@ -1,0 +1,4 @@
+# dsh bundle layer: mount the skill library viewer plugin.
+- insert:
+    - id: skill-ui
+      name: 'dsh-skill-ui'

@@ -112,3 +112,34 @@ if [ -d "$SKILLS_SRC" ]; then
 else
   echo "警告: 找不到共享 skill 源码 $SKILLS_SRC，跳过" >&2
 fi
+
+# 5) dsh-skill-ui 技能库查看界面（bundle 插件，可 pnpm 安装/卸载）
+SKILL_UI_SRC="$SELF_DIR/../dsh-plugin-skill-ui"
+SKILL_UI_DEPLOY="$DSH_ROOT/dsh-plugin-skill-ui"
+if [ -d "$SKILL_UI_SRC" ]; then
+  if [ ! "$SKILL_UI_SRC" -ef "$SKILL_UI_DEPLOY" ]; then
+    mkdir -p "$SKILL_UI_DEPLOY"
+    cp -r "$SKILL_UI_SRC/." "$SKILL_UI_DEPLOY/"
+  fi
+  if [ -f "$PROFILE_DIR/package.json" ]; then
+    export PATH="$DSH_ROOT/node/bin:$PATH"
+    if ! grep -q '"dsh-skill-ui"' "$PROFILE_DIR/package.json"; then
+      (cd "$PROFILE_DIR" && pnpm add "file:$SKILL_UI_DEPLOY" >/dev/null 2>&1) || \
+        echo "警告: pnpm 安装 dsh-skill-ui 失败，技能库查看界面可能不可用" >&2
+    fi
+    python3 - "$PROFILE_DIR/package.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+bundles = d.setdefault('dsh', {}).setdefault('profile', {}).setdefault('bundles', [])
+if 'dsh-skill-ui' not in bundles:
+    bundles.append('dsh-skill-ui')
+    with open(p, 'w') as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+    print(f"bundles 已加 dsh-skill-ui: {p}")
+PY
+  fi
+else
+  echo "警告: 找不到 dsh-skill-ui 源码 $SKILL_UI_SRC，跳过（技能库查看界面不可用）" >&2
+fi
