@@ -172,8 +172,19 @@ backend_run() {
   args+=(--ro "$NODE_ROOT")
   [ -d "$SHARED_PROFILES" ] && args+=(--ro "$SHARED_PROFILES")
 
-  # 可写：本人实例状态 + 本人工作区
-  args+=(--rw "$DSH_HOME_DIR" --rw "$WORKSPACE")
+  # 可写：本人实例状态
+  args+=(--rw "$DSH_HOME_DIR")
+
+  # 工作区：读写+创建，但【不可删除】——AI 能读、能改、能覆盖、能新建文件，
+  # 但 rm 不动任何文件/目录，保护员工经 FileBrowser 上传的原始资料。
+  # AI 自己的上传/产出走 uploads/（见下），那里保留完整删除权。
+  args+=(--rwnd "$WORKSPACE")
+
+  # AI 上传/产出目录：完整读写，可删除。DSH_UPLOAD_DIR 指向这里（文件上传
+  # 插件的落盘），AI 生成的临时/中间文件也该放这里——根目录删不动。
+  local ai_out="$WORKSPACE/uploads"
+  mkdir -p "$ai_out" 2>/dev/null || true
+  args+=(--rw "$ai_out")
 
   # 私有临时目录。不放行 /tmp —— 那是全机共享的，员工之间会互相看见。
   local privtmp="$DSH_HOME_DIR/tmp"

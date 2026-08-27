@@ -140,6 +140,15 @@ def rwio_access(abi: int) -> int:
     return a
 
 
+def rwnd_access(abi: int) -> int:
+    """读写+创建，但不可删除。给工作区用：AI 能读、能写/覆盖、能新建文件，
+    但不能 rm 删除任何文件或目录——保护员工经 FileBrowser 上传的原始资料。
+    AI 自己的产出/上传落在单独的 --rw 目录（如 uploads/）里，那里可删。"""
+    a = rw_access(abi)
+    a &= ~(FS["remove_file"] | FS["remove_dir"])
+    return a
+
+
 def _create_ruleset(abi: int, handled_fs: int, handled_net: int, scoped: int) -> int:
     """结构体布局随 ABI 增长；传的 size 必须和我们填的字段数一致。"""
     if abi >= 6:
@@ -195,7 +204,8 @@ def _add_port(ruleset_fd: int, port: int, access: int) -> None:
 
 def apply_landlock(ro: list[str], rw: list[str],
                    bind_ports: list[int], connect_ports: list[int],
-                   rwio: list[str] | None = None) -> dict:
+                   rwio: list[str] | None = None,
+                   rwnd: list[str] | None = None) -> dict:
     """给【当前进程】上锁。返回一份说明这次到底锁住了什么的报告。
 
     上锁后不可撤销，且 exec 之后仍然有效——这正是我们要的：dsh 换成 bash、
@@ -220,7 +230,7 @@ def apply_landlock(ro: list[str], rw: list[str],
         err = ctypes.get_errno()
         raise RuntimeError(f"create_ruleset 失败: {os.strerror(err)}")
 
-    report = {"abi": abi, "ro": [], "rw": [], "rwio": [], "bind": [], "connect": [],
+    report = {"abi": abi, "ro": [], "rw": [], "rwio": [], "rwnd": [], "bind": [], "connect": [],
               "net": bool(handled_net), "scoped": bool(scoped)}
     try:
         for p in ro:
@@ -231,6 +241,10 @@ def apply_landlock(ro: list[str], rw: list[str],
             if os.path.exists(p):
                 _add_path(fd, p, rwio_access(abi) & handled_fs)
                 report["rwio"].append(p)
+        for p in (rwnd or []):
+            if os.path.exists(p):
+                _add_path(fd, p, rwnd_access(abi) & handled_fs)
+                report["rwnd"].append(p)
         for p in rw:
             if os.path.exists(p):
                 _add_path(fd, p, rw_access(abi))
@@ -297,6 +311,7 @@ def main(argv: list[str]) -> int:
     ro: list[str] = []
     rw: list[str] = []
     rwio: list[str] = []
+    rwnd: list[str] = []
     bind_ports: list[int] = []
     connect_ports: list[int] = []
     i = 1
@@ -315,6 +330,8 @@ def main(argv: list[str]) -> int:
             rw.append(val)
         elif a == "--rwio":
             rwio.append(val)
+        elif a == "--rwnd":
+            rwnd.append(val)
         elif a == "--bind-port":
             bind_ports.append(int(val))
         elif a == "--connect-port":
@@ -330,14 +347,14 @@ def main(argv: list[str]) -> int:
         return 2
 
     try:
-        rep = apply_landlock(ro, rw, bind_ports, connect_ports, rwio=rwio)
+        rep = apply_landlock(ro, rw, bind_ports, connect_ports, rwio=rwio, rwnd=rwnd)
     except Exception as exc:  # noqa: BLE001
         # 上不了锁就【不要执行】——宁可实例起不来，也不裸跑
         print(f"[landlock] 上锁失败，拒绝启动: {exc}", file=sys.stderr)
         return 1
 
     print(f"[landlock] 已上锁 abi=v{rep['abi']} "
-          f"ro={len(rep['ro'])} rwio={len(rep['rwio'])} rw={len(rep['rw'])} "
+          f"ro={len(rep['ro'])} rwio={len(rep['rwio'])} rwnd={len(rep['rwnd'])} rw={len(rep['rw'])} "
           f"net={'on' if rep['net'] else 'off'} "
           f"scope={'on' if rep['scoped'] else 'off'}", file=sys.stderr)
     sys.stderr.flush()
