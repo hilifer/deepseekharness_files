@@ -331,6 +331,8 @@ class Config:
     @property
     def shared_profiles(self) -> Path: return self.root / ".local" / "share" / "dsh" / "profiles"
     @property
+    def shared_skills(self) -> Path: return self.root / ".local" / "share" / "dsh" / "skills"
+    @property
     def socket_dir(self) -> Path: return self.root / "dsh-sockets"
 
     def upstream_for(self, username: str, port: int) -> str:
@@ -774,6 +776,15 @@ class Engine:
                     f"复制共享 profiles 失败: {self.cfg.shared_profiles} -> {profiles}（{exc}）\n"
                     "  这一步不能用软链代替：只读的共享目录会让 dsh 启动时写配置直接 EACCES。\n"
                     "  请检查磁盘空间与目录权限后重试。") from exc
+        skills = dsh_home / "skills"
+        if not skills.exists() and self.cfg.shared_skills.exists():
+            # 员工级 skill：从共享目录独立副本复制（与 profiles 同理，各实例可写
+            # 自己的、天然隔离）。skill 的 filesystem provider 默认扫 $DSH_HOME/skills。
+            try:
+                shutil.copytree(self.cfg.shared_skills, skills, symlinks=True)
+            except OSError as exc:
+                raise ProvisionError(
+                    f"复制共享 skills 失败: {self.cfg.shared_skills} -> {skills}（{exc}）") from exc
         ws_file = dsh_home / "storages" / "workspace.json"
         if not ws_file.exists():
             wsid = secrets.token_hex(16)

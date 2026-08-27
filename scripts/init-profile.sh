@@ -100,3 +100,15 @@ PY
 else
   echo "警告: 找不到 dsh-schedule-ui 源码 $SCHEDULE_UI_SRC，跳过（定时任务管理界面不可用）" >&2
 fi
+
+# 4) 共享 skill（员工级 skill 模板，新用户由 _seed_dsh_home 从共享目录复制）
+SKILLS_SRC="$SELF_DIR/../dsh-skills"
+SKILLS_DST="$DSH_ROOT/.local/share/dsh/skills"
+if [ -d "$SKILLS_SRC" ]; then
+  if [ ! "$SKILLS_SRC" -ef "$SKILLS_DST" ]; then
+    mkdir -p "$SKILLS_DST"
+    cp -r "$SKILLS_SRC/." "$SKILLS_DST/"
+  fi
+else
+  echo "警告: 找不到共享 skill 源码 $SKILLS_SRC，跳过" >&2
+fi
