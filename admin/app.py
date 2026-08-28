@@ -115,6 +115,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._dispatch("POST")
 
+    def do_PUT(self):
+        self._dispatch("PUT")
+
     def do_PATCH(self):
         self._dispatch("PATCH")
 
@@ -125,6 +128,11 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/admin"
         query = parse_qs(parsed.query)
+
+        # 员工插件市场：身份 = Remote-User（nginx 经 auth_request 注入），不要求管理员。
+        if path.startswith("/plugin-market"):
+            self._dispatch_market(method, path, query)
+            return
 
         # 静态页面同样要求登录（nginx 已挡了一层，这里是纵深防御）
         actor = self._actor()
@@ -137,6 +145,35 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_static(path)
                 return
             self._api(method, path, query, actor)
+        except ProvisionError as exc:
+            self._json(400, {"error": str(exc)})
+        except Exception as exc:  # noqa: BLE001
+            traceback.print_exc()
+            self._json(500, {"error": f"内部错误: {exc}"})
+
+    def _dispatch_market(self, method: str, path: str, query: dict):
+        """员工插件市场 API。身份 = Remote-User（员工登录名），只能操作自己的插件。"""
+        user = (self.headers.get("Remote-User") or "").strip()
+        if not user:
+            self._json(403, {"error": "未认证"})
+            return
+        try:
+            if path == "/plugin-market/api/list" and method == "GET":
+                self._json(200, {"plugins": ENGINE.list_market_plugins(user)})
+                return
+            if path == "/plugin-market/api/install" and method == "POST":
+                body = self._body()
+                res = ENGINE.install_plugin(user, body.get("plugin", ""))
+                audit(user, "install_plugin", res)
+                self._json(200, res)
+                return
+            if path == "/plugin-market/api/uninstall" and method == "POST":
+                body = self._body()
+                res = ENGINE.uninstall_plugin(user, body.get("plugin", ""))
+                audit(user, "uninstall_plugin", res)
+                self._json(200, res)
+                return
+            self._json(404, {"error": f"未知接口: {method} {path}"})
         except ProvisionError as exc:
             self._json(400, {"error": str(exc)})
         except Exception as exc:  # noqa: BLE001
@@ -168,6 +205,16 @@ class Handler(BaseHTTPRequestHandler):
                              "backend": ENGINE.isolation_backend(),
                              "admin_users": sorted(ADMIN_USERS), "actor": actor})
             return
+
+        if path == "/admin/api/plugin-allowlist":
+            if method == "GET":
+                self._json(200, {"plugins": ENGINE.get_plugin_allowlist()})
+                return
+            if method == "PUT":
+                res = ENGINE.set_plugin_allowlist(self._body().get("plugins", []))
+                audit(actor, "set_plugin_allowlist", {"plugins": res})
+                self._json(200, {"plugins": res})
+                return
 
         if path == "/admin/api/users":
             if method == "GET":

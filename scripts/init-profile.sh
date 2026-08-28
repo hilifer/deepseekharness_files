@@ -143,3 +143,34 @@ PY
 else
   echo "警告: 找不到 dsh-skill-ui 源码 $SKILL_UI_SRC，跳过（技能库查看界面不可用）" >&2
 fi
+
+# 6) dsh-plugin-market 插件市场（bundle 插件，可 pnpm 安装/卸载）
+MARKET_SRC="$SELF_DIR/../dsh-plugin-market"
+MARKET_DEPLOY="$DSH_ROOT/dsh-plugin-market"
+if [ -d "$MARKET_SRC" ]; then
+  if [ ! "$MARKET_SRC" -ef "$MARKET_DEPLOY" ]; then
+    mkdir -p "$MARKET_DEPLOY"
+    cp -r "$MARKET_SRC/." "$MARKET_DEPLOY/"
+  fi
+  if [ -f "$PROFILE_DIR/package.json" ]; then
+    export PATH="$DSH_ROOT/node/bin:$PATH"
+    if ! grep -q '"dsh-plugin-market"' "$PROFILE_DIR/package.json"; then
+      (cd "$PROFILE_DIR" && pnpm add "file:$MARKET_DEPLOY" >/dev/null 2>&1) || \
+        echo "警告: pnpm 安装 dsh-plugin-market 失败，插件市场可能不可用" >&2
+    fi
+    python3 - "$PROFILE_DIR/package.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+bundles = d.setdefault('dsh', {}).setdefault('profile', {}).setdefault('bundles', [])
+if 'dsh-plugin-market' not in bundles:
+    bundles.append('dsh-plugin-market')
+    with open(p, 'w') as f:
+        json.dump(d, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+    print(f"bundles 已加 dsh-plugin-market: {p}")
+PY
+  fi
+else
+  echo "警告: 找不到 dsh-plugin-market 源码 $MARKET_SRC，跳过（插件市场不可用）" >&2
+fi

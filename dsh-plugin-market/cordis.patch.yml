@@ -1,0 +1,6 @@
+# dsh bundle layer: mount the plugin marketplace viewer plugin.
+# 服务端无需注册 HTTP 路由——客户端直接 fetch nginx 的 /plugin-market/ 路由
+#（转发到 admin 后台）。这里只保留一个空 apply 让 bundle 能被加载。
+- insert:
+    - id: plugin-market
+      name: 'dsh-plugin-market'

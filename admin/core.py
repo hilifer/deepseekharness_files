@@ -910,6 +910,82 @@ class Engine:
 
         return {**rec, "initial_password": password}
 
+    # ---------------- 插件市场 ----------------
+    _PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+
+    def get_plugin_allowlist(self) -> list[str]:
+        """管理员配置的「员工可自助安装」插件白名单。"""
+        reg = self.load_registry()
+        return list(reg.get("plugin_allowlist", []))
+
+    def set_plugin_allowlist(self, plugins: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for p in plugins:
+            p = (p or "").strip()
+            if not p:
+                continue
+            if not self._PLUGIN_NAME_RE.fullmatch(p):
+                raise ProvisionError(f"插件名不合法: {p!r}")
+            if p not in cleaned:
+                cleaned.append(p)
+        reg = self.load_registry()
+        reg["plugin_allowlist"] = cleaned
+        self.save_registry(reg)
+        return cleaned
+
+    def _installed_market_plugins(self, username: str) -> set[str]:
+        """员工 profile 里已安装的依赖（含市场插件与系统插件）。"""
+        pkg_file = self.cfg.users_root / username / "profiles" / "web" / "package.json"
+        try:
+            pkg = json.loads(pkg_file.read_text(encoding="utf-8"))
+            return set(pkg.get("dependencies", {}).keys())
+        except Exception:
+            return set()
+
+    def list_market_plugins(self, username: str) -> list[dict]:
+        """白名单 + 该员工的安装状态，供员工插件市场面板展示。"""
+        installed = self._installed_market_plugins(username)
+        return [{"name": p, "installed": p in installed} for p in self.get_plugin_allowlist()]
+
+    def _run_plugin_cmd(self, username: str, action: str, plugin: str) -> None:
+        dsh_home = self.cfg.users_root / username
+        res = self.run.run(
+            ["dsh", "plugin", "--profile", "web", action, plugin],
+            env={"PATH": f"{self.cfg.root}/node/bin:/usr/local/bin:/usr/bin:/bin",
+                 "DSH_HOME": str(dsh_home)},
+            cwd=str(dsh_home / "profiles" / "web"),
+            timeout=300)
+        if res.returncode != 0:
+            raise ProvisionError(
+                f"插件 {action} {plugin} 失败: {(res.stderr or res.stdout).strip()[:300]}")
+
+    def install_plugin(self, username: str, plugin: str) -> dict:
+        username = validate_username(username)
+        if not self._PLUGIN_NAME_RE.fullmatch(plugin or ""):
+            raise ProvisionError(f"插件名不合法: {plugin!r}")
+        if plugin not in self.get_plugin_allowlist():
+            raise ProvisionError(f"插件 {plugin} 不在白名单里，拒绝安装")
+        reg = self.load_registry()
+        rec = reg["users"].get(username)
+        if not rec:
+            raise ProvisionError(f"用户 {username} 不存在")
+        self._run_plugin_cmd(username, "add", plugin)
+        self.dsh_restart(username, rec)
+        return {"username": username, "plugin": plugin, "installed": True}
+
+    def uninstall_plugin(self, username: str, plugin: str) -> dict:
+        username = validate_username(username)
+        if not self._PLUGIN_NAME_RE.fullmatch(plugin or ""):
+            raise ProvisionError(f"插件名不合法: {plugin!r}")
+        if plugin in self._installed_market_plugins(username):
+            reg = self.load_registry()
+            rec = reg["users"].get(username)
+            if not rec:
+                raise ProvisionError(f"用户 {username} 不存在")
+            self._run_plugin_cmd(username, "remove", plugin)
+            self.dsh_restart(username, rec)
+        return {"username": username, "plugin": plugin, "installed": False}
+
     def set_mounts(self, username: str, mounts: list[dict]) -> dict:
         """设置该用户额外可访问的空间（本人工作区之外）。改动后重启实例生效。"""
         username = validate_username(username)

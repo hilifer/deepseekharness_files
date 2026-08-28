@@ -81,6 +81,7 @@ input:focus,select:focus{outline:2px solid color-mix(in srgb,var(--accent) 45%,t
     <span class="muted" id="who"></span>
     <span class="spacer"></span>
     <button id="refresh">刷新</button>
+    <button id="market">插件市场</button>
     <button class="primary" id="new">+ 新增员工</button>
   </header>
 
@@ -373,6 +374,50 @@ document.addEventListener('click', async ev => {
 $('#refresh').onclick = load;
 load();
 setInterval(load, 30000);
+
+/* ---------- 插件市场白名单 ---------- */
+function renderAllowlist() {
+  const box = $('#allowlist');
+  if (!box) return;
+  api('GET', '/admin/api/plugin-allowlist').then(d => {
+    const list = d.plugins || [];
+    box.innerHTML = list.length
+      ? '<div>' + list.map((p) =>
+          `<span class="tag" style="margin:2px">${esc(p)} <a href="#" data-rm="${esc(p)}" style="color:var(--danger);text-decoration:none;margin-left:4px">✕</a></span>`
+        ).join('') + '</div>'
+      : '<span class="muted">（空——员工暂无自助安装的插件）</span>';
+    box.querySelectorAll('[data-rm]').forEach(a => a.onclick = async (e) => {
+      e.preventDefault();
+      const cur = await api('GET', '/admin/api/plugin-allowlist');
+      const list = (cur.plugins || []).filter(p => p !== a.dataset.rm);
+      await api('PUT', '/admin/api/plugin-allowlist', { plugins: list });
+      renderAllowlist();
+    });
+  }).catch(() => {});
+}
+
+$('#market').onclick = () => {
+  dialog({
+    title: '插件市场白名单',
+    wide: true,
+    bodyHTML: `<div class="hint">这里维护「员工可自助安装」的插件白名单。员工在自己的 DSH 设置页 →
+      插件市场里，只能看到并安装这份清单里的插件；安装是每员工独立的，互不影响。</div>
+      <div id="allowlist" class="hint">加载中…</div>
+      <label>添加插件（npm 包名）
+        <input id="f-plugin" placeholder="例如 dsh-code-review" autocomplete="off"></label>`,
+    okText: '保存',
+    onOk: async () => {
+      const name = val('#f-plugin');
+      if (name) {
+        const cur = await api('GET', '/admin/api/plugin-allowlist');
+        const list = cur.plugins || [];
+        if (!list.includes(name)) list.push(name);
+        await api('PUT', '/admin/api/plugin-allowlist', { plugins: list });
+      }
+    },
+  });
+  renderAllowlist();
+};
 </script>
 </body>
 </html>
