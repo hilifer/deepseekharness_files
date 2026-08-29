@@ -786,8 +786,6 @@ class Engine:
                 raise ProvisionError(
                     f"复制共享 skills 失败: {self.cfg.shared_skills} -> {skills}（{exc}）") from exc
         ws_file = dsh_home / "storages" / "workspace.json"
-        ai_workspace = workspace / self.AI_WORKSPACE_DIR
-        ai_workspace.mkdir(parents=True, exist_ok=True)
         if not ws_file.exists():
             wsid = secrets.token_hex(16)
             now = _now()
@@ -795,7 +793,7 @@ class Engine:
                 "unit": {"name": "workspace", "version": 2},
                 "global": {"initialized": True, "workspaceIds": [wsid], "archivedSessionIds": []},
                 "tables": {"workspaces": {wsid: {
-                    "path": str(ai_workspace), "title": name, "sessionIds": [],
+                    "path": str(workspace), "title": name, "sessionIds": [],
                     "createdAt": now, "updatedAt": now}}},
             }, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -918,12 +916,7 @@ class Engine:
     # 系统默认插件（init-profile.sh 自动安装），不出现在「插件市场」列表里——
     # 它们不是员工可选装的，是每个实例自带的。
     _SYSTEM_PLUGINS = frozenset({"dsh-wechat", "dsh-schedule-ui", "dsh-skill-ui",
-                                 "dshmarket"})
-
-    # AI 工作目录名：AI 的 session cwd 指到这里（可自由建/删），工作区根只放
-    # 员工经 FileBrowser 上传的原始资料（不可删）。与 landlock.sh / common.sh
-    # 里的 ai_workspace 保持一致。
-    AI_WORKSPACE_DIR = "ai_workspace"
+                                 "dsh-plugin-market"})
 
     def get_plugin_allowlist(self) -> list[str]:
         """管理员配置的「员工可自助安装」插件白名单。"""
