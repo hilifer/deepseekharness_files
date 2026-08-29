@@ -177,15 +177,14 @@ backend_run() {
 
   # 工作区：读写+创建，但【不可删除】——AI 能读、能改、能覆盖、能新建文件，
   # 但 rm 不动任何文件/目录，保护员工经 FileBrowser 上传的原始资料。
-  # AI 自己的产出走 AIWORKER/（见下），那里保留完整删除权。
+  # AI 自己的上传/产出走 uploads/（见下），那里保留完整删除权。
   args+=(--rwnd "$WORKSPACE")
 
-  # AI 工作目录：完整读写，可删除。AI 的 cwd 指到这里（见下方 cd），AI 生成
-  # 的文件、write/edit 的落盘、上传的文件（DSH_UPLOAD_DIR）都在这里——
-  # 根目录删不动，这里可以自由建/删。
-  local ai_work="$WORKSPACE/AIWORKER"
-  mkdir -p "$ai_work" 2>/dev/null || true
-  args+=(--rw "$ai_work")
+  # AI 上传/产出目录：完整读写，可删除。DSH_UPLOAD_DIR 指向这里（文件上传
+  # 插件的落盘），AI 生成的临时/中间文件也该放这里——根目录删不动。
+  local ai_out="$WORKSPACE/uploads"
+  mkdir -p "$ai_out" 2>/dev/null || true
+  args+=(--rw "$ai_out")
 
   # 私有临时目录。不放行 /tmp —— 那是全机共享的，员工之间会互相看见。
   local privtmp="$DSH_HOME_DIR/tmp"
@@ -219,8 +218,8 @@ backend_run() {
   for kv in "${INSTANCE_ENV[@]}"; do envargs+=("$kv"); done
 
   apply_rlimits
-  cd "$ai_work"
-  log "启动 $USERNAME: port=$PORT ws=$WORKSPACE (Landlock 自我沙箱，cwd=$ai_work)"
+  cd "$WORKSPACE"
+  log "启动 $USERNAME: port=$PORT ws=$WORKSPACE (Landlock 自我沙箱)"
   exec "${envargs[@]}" "$py" "$LANDLOCK_EXEC" "${args[@]}" -- \
     "$NODE_BIN" "$DSH_BIN" web --port "$PORT" "${HOST_ARGS[@]}"
 }
