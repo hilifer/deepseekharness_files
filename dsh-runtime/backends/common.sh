@@ -191,10 +191,10 @@ build_instance_env() { # $1=username $2=dsh_home $3=workspace $4=allowed_roots
     "DSH_HOME=$home"
     "DSH_ALLOWED_ROOT=$ws"       # 第二层：选择器 UX 钳制（主工作区）
     "DSH_ALLOWED_ROOTS=$roots"   # 含额外空间的完整允许列表，每行一条
-    # 文件上传插件的落盘目录。插件默认存到 $DSH_HOME/uploads —— 那个目录不在
-    # FileBrowser 的 source 里，员工在 dsh 里传的文件在文件服务器上根本看不见，
-    # 与「两边看到同一个空间」相矛盾。默认改到本人工作区之下。
-    "DSH_UPLOAD_DIR=${DSH_UPLOAD_DIR:-$ws/uploads}"
+    # 文件上传插件的落盘目录。默认改到 AI 工作目录（AIWORKER），与 AI 的 cwd
+    # 一致——AI 上传的文件和 AI 生成的文件落在同一个可删除区域，根目录只放
+    # 员工经 FileBrowser 上传的原始资料。
+    "DSH_UPLOAD_DIR=${DSH_UPLOAD_DIR:-$ws/AIWORKER}"
     "DSH_NODE_ROOT=$NODE_ROOT"   # 钳制插件据此定位 dsh 的内部包
     "USER=$username"
     "LANG=${LANG:-C.UTF-8}"
