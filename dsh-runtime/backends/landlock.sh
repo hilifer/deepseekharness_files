@@ -177,12 +177,12 @@ backend_run() {
 
   # 工作区：读写+创建，但【不可删除】——AI 能读、能改、能覆盖、能新建文件，
   # 但 rm 不动任何文件/目录，保护员工经 FileBrowser 上传的原始资料。
-  # AI 自己的上传/产出走 uploads/（见下），那里保留完整删除权。
+  # AI 自己的上传/产出走 ai_workspace/（见下），那里保留完整删除权。
   args+=(--rwnd "$WORKSPACE")
 
-  # AI 上传/产出目录：完整读写，可删除。DSH_UPLOAD_DIR 指向这里（文件上传
-  # 插件的落盘），AI 生成的临时/中间文件也该放这里——根目录删不动。
-  local ai_out="$WORKSPACE/uploads"
+  # AI 工作目录：完整读写，可删除。AI 生成的文件、上传的文件（DSH_UPLOAD_DIR）
+  # 都落在这里——根目录删不动，这里可以自由建/删。
+  local ai_out="$WORKSPACE/ai_workspace"
   mkdir -p "$ai_out" 2>/dev/null || true
   args+=(--rw "$ai_out")
 

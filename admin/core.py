@@ -784,7 +784,13 @@ class Engine:
                 shutil.copytree(self.cfg.shared_skills, skills, symlinks=True)
             except OSError as exc:
                 raise ProvisionError(
-                    f"复制共享 skills 失败: {self.cfg.shared_skills} -> {skills}（{exc}）") from exc
+                    f"复制共享 skills 失败: {self.cfg.shared_skills} -> {skills}（{exc}") from exc
+        # AI 工作规则（AGENTS.md）：约定 AI 生成的新文件放到 ai_workspace/，
+        # 读取/修改工作区根原始文件时不移动不删除。dsh-agent-instructions 在
+        # 每个会话注入 $DSH_HOME/AGENTS.md。
+        agents_md = dsh_home / "AGENTS.md"
+        if not agents_md.exists():
+            agents_md.write_text(self.AGENTS_MD, encoding="utf-8")
         ws_file = dsh_home / "storages" / "workspace.json"
         if not ws_file.exists():
             wsid = secrets.token_hex(16)
@@ -916,7 +922,17 @@ class Engine:
     # 系统默认插件（init-profile.sh 自动安装），不出现在「插件市场」列表里——
     # 它们不是员工可选装的，是每个实例自带的。
     _SYSTEM_PLUGINS = frozenset({"dsh-wechat", "dsh-schedule-ui", "dsh-skill-ui",
-                                 "dsh-plugin-market"})
+                                 "dshmarket"})
+
+    # 员工 DSH_HOME 下注入的 AI 工作规则（dsh-agent-instructions 每会话注入
+    # $DSH_HOME/AGENTS.md）。约定：AI 新建的文件放 ai_workspace/，读改工作区根
+    # 原始文件时不移动不删除。
+    AGENTS_MD = """# AI 工作区规则
+
+1. 你【新建】的文件（代码、报告、脚本、临时产物等）统一保存到当前工作区的 `ai_workspace/` 目录下，不要散落在工作区根目录。
+2. 你【读取或修改】工作区根目录下已有的原始文件时，直接操作原文件本身，不要移动、重命名或删除它们。
+3. `ai_workspace/` 里的文件是你自己的产出，可以自由创建和删除；工作区根里的原始文件是员工上传的资料，只读改、不删除。
+"""
 
     def get_plugin_allowlist(self) -> list[str]:
         """管理员配置的「员工可自助安装」插件白名单。"""
