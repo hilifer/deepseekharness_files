@@ -159,7 +159,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if path == "/plugin-market/api/list" and method == "GET":
-                self._json(200, {"plugins": ENGINE.list_market_plugins(user)})
+                self._json(200, ENGINE.list_market_plugins(user))
                 return
             if path == "/plugin-market/api/install" and method == "POST":
                 body = self._body()
@@ -208,12 +208,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/admin/api/plugin-allowlist":
             if method == "GET":
-                self._json(200, {"plugins": ENGINE.get_plugin_allowlist()})
+                self._json(200, {"plugins": ENGINE.get_plugin_allowlist(),
+                                 "allow_all": ENGINE.get_plugin_allow_all()})
                 return
             if method == "PUT":
-                res = ENGINE.set_plugin_allowlist(self._body().get("plugins", []))
-                audit(actor, "set_plugin_allowlist", {"plugins": res})
-                self._json(200, {"plugins": res})
+                body = self._body()
+                res = ENGINE.set_plugin_allowlist(body.get("plugins", []))
+                allow_all = ENGINE.set_plugin_allow_all(body.get("allow_all", False))
+                audit(actor, "set_plugin_allowlist",
+                      {"plugins": res, "allow_all": allow_all})
+                self._json(200, {"plugins": res, "allow_all": allow_all})
                 return
 
         if path == "/admin/api/users":

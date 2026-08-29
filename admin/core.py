@@ -911,12 +911,29 @@ class Engine:
         return {**rec, "initial_password": password}
 
     # ---------------- 插件市场 ----------------
-    _PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
+    _PLUGIN_NAME_RE = re.compile(r"^(?:@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+    # 系统默认插件（init-profile.sh 自动安装），不出现在「插件市场」列表里——
+    # 它们不是员工可选装的，是每个实例自带的。
+    _SYSTEM_PLUGINS = frozenset({"dsh-wechat", "dsh-schedule-ui", "dsh-skill-ui",
+                                 "dsh-plugin-market"})
 
     def get_plugin_allowlist(self) -> list[str]:
         """管理员配置的「员工可自助安装」插件白名单。"""
         reg = self.load_registry()
         return list(reg.get("plugin_allowlist", []))
+
+    def get_plugin_allow_all(self) -> bool:
+        """是否放开白名单限制（演示模式）。true 时员工可安装任意插件。"""
+        reg = self.load_registry()
+        return bool(reg.get("plugin_allow_all", False))
+
+    def set_plugin_allow_all(self, flag: bool) -> bool:
+        flag = bool(flag)
+        reg = self.load_registry()
+        reg["plugin_allow_all"] = flag
+        self.save_registry(reg)
+        return flag
 
     def set_plugin_allowlist(self, plugins: list[str]) -> list[str]:
         cleaned: list[str] = []
@@ -942,10 +959,21 @@ class Engine:
         except Exception:
             return set()
 
-    def list_market_plugins(self, username: str) -> list[dict]:
-        """白名单 + 该员工的安装状态，供员工插件市场面板展示。"""
+    def list_market_plugins(self, username: str) -> dict:
+        """员工插件市场视图：{ allow_all, plugins }。
+
+        allow_all=false 时 plugins 是白名单 + 安装状态；allow_all=true 时（演示
+        模式）白名单不生效，plugins 是该员工已安装的插件列表（员工可自由输入
+        任意插件名安装）。
+        """
         installed = self._installed_market_plugins(username)
-        return [{"name": p, "installed": p in installed} for p in self.get_plugin_allowlist()]
+        if self.get_plugin_allow_all():
+            return {"allow_all": True,
+                    "plugins": sorted({"name": p, "installed": True} for p in installed
+                                      if p not in self._SYSTEM_PLUGINS)}
+        return {"allow_all": False,
+                "plugins": [{"name": p, "installed": p in installed}
+                            for p in self.get_plugin_allowlist()]}
 
     def _run_plugin_cmd(self, username: str, action: str, plugin: str) -> None:
         dsh_home = self.cfg.users_root / username
@@ -963,7 +991,7 @@ class Engine:
         username = validate_username(username)
         if not self._PLUGIN_NAME_RE.fullmatch(plugin or ""):
             raise ProvisionError(f"插件名不合法: {plugin!r}")
-        if plugin not in self.get_plugin_allowlist():
+        if not self.get_plugin_allow_all() and plugin not in self.get_plugin_allowlist():
             raise ProvisionError(f"插件 {plugin} 不在白名单里，拒绝安装")
         reg = self.load_registry()
         rec = reg["users"].get(username)

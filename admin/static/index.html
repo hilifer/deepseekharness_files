@@ -381,6 +381,8 @@ function renderAllowlist() {
   if (!box) return;
   api('GET', '/admin/api/plugin-allowlist').then(d => {
     const list = d.plugins || [];
+    const chk = $('#f-allow-all');
+    if (chk) chk.checked = !!d.allow_all;
     box.innerHTML = list.length
       ? '<div>' + list.map((p) =>
           `<span class="tag" style="margin:2px">${esc(p)} <a href="#" data-rm="${esc(p)}" style="color:var(--danger);text-decoration:none;margin-left:4px">✕</a></span>`
@@ -390,7 +392,7 @@ function renderAllowlist() {
       e.preventDefault();
       const cur = await api('GET', '/admin/api/plugin-allowlist');
       const list = (cur.plugins || []).filter(p => p !== a.dataset.rm);
-      await api('PUT', '/admin/api/plugin-allowlist', { plugins: list });
+      await api('PUT', '/admin/api/plugin-allowlist', { plugins: list, allow_all: cur.allow_all });
       renderAllowlist();
     });
   }).catch(() => {});
@@ -402,18 +404,20 @@ $('#market').onclick = () => {
     wide: true,
     bodyHTML: `<div class="hint">这里维护「员工可自助安装」的插件白名单。员工在自己的 DSH 设置页 →
       插件市场里，只能看到并安装这份清单里的插件；安装是每员工独立的，互不影响。</div>
+      <label class="chk"><input type="checkbox" id="f-allow-all">
+        <span><b>放开白名单（演示模式）</b>——勾选后员工可自由输入任意插件名安装，白名单不生效。
+        后期取消勾选即恢复白名单限制。</span></label>
       <div id="allowlist" class="hint">加载中…</div>
       <label>添加插件（npm 包名）
         <input id="f-plugin" placeholder="例如 dsh-code-review" autocomplete="off"></label>`,
     okText: '保存',
     onOk: async () => {
+      const cur = await api('GET', '/admin/api/plugin-allowlist');
+      const list = cur.plugins || [];
       const name = val('#f-plugin');
-      if (name) {
-        const cur = await api('GET', '/admin/api/plugin-allowlist');
-        const list = cur.plugins || [];
-        if (!list.includes(name)) list.push(name);
-        await api('PUT', '/admin/api/plugin-allowlist', { plugins: list });
-      }
+      if (name && !list.includes(name)) list.push(name);
+      await api('PUT', '/admin/api/plugin-allowlist',
+        { plugins: list, allow_all: $('#f-allow-all').checked });
     },
   });
   renderAllowlist();
