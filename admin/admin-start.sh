@@ -9,7 +9,10 @@ export ADMIN_PORT="${ADMIN_PORT:-19200}"
 export ADMIN_HOST=127.0.0.1
 export DSH_ROOT
 
-is_up() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+is_up() {
+  local pid; pid=$(cat "$PIDFILE" 2>/dev/null)
+  [ -n "$pid" ] && [ -d "/proc/$pid" ] && [ "$(awk '/^State:/{print $2}' /proc/$pid/status 2>/dev/null)" != "Z" ]
+}
 
 start() {
   if is_up; then echo "admin already running (pid $(cat "$PIDFILE"))"; return 0; fi

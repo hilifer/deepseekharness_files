@@ -7,8 +7,12 @@ DSH_ROOT="${DSH_ROOT:-$HOME}"; export DSH_ROOT
 PIDFILE="$DSH_ROOT/dsh-runtime/dsh.pid"
 LOG="$DSH_ROOT/dsh-runtime/dsh.log"
 SANDBOX="$DSH_ROOT/dsh-runtime/dsh-sandbox.sh"
+is_up() {
+  local pid; pid=$(cat "$PIDFILE" 2>/dev/null)
+  [ -n "$pid" ] && [ -d "/proc/$pid" ] && [ "$(awk '/^State:/{print $2}' /proc/$pid/status 2>/dev/null)" != "Z" ]
+}
 start() {
-  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+  if is_up; then
     echo "dsh already running (pid $(cat "$PIDFILE"))"; return 0
   fi
   if ! "$SANDBOX" --check >/dev/null 2>&1; then

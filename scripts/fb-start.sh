@@ -6,7 +6,10 @@ CONF="$DSH_ROOT/filebrowser/config.yaml"
 PIDFILE="$DSH_ROOT/filebrowser/fb.pid"
 LOG="$DSH_ROOT/filebrowser/logs/fb.log"
 
-is_up() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+is_up() {
+  local pid; pid=$(cat "$PIDFILE" 2>/dev/null)
+  [ -n "$pid" ] && [ -d "/proc/$pid" ] && [ "$(awk '/^State:/{print $2}' /proc/$pid/status 2>/dev/null)" != "Z" ]
+}
 
 # 代理认证头是「证明请求来自 nginx」的共享密钥。init-secrets.sh 会就地改写
 # config.yaml 写入真值，于是部署机上这个被跟踪的文件永远是脏的、git pull 会打架

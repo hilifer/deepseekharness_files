@@ -10,9 +10,13 @@ ensure_secrets() {
     "$DSH_ROOT/scripts/init-secrets.sh" || return 1
   fi
 }
+is_up() {
+  local pid; pid=$(cat "$DSH_ROOT/nginx/nginx.pid" 2>/dev/null)
+  [ -n "$pid" ] && [ -d "/proc/$pid" ] && [ "$(awk '/^State:/{print $2}' /proc/$pid/status 2>/dev/null)" != "Z" ]
+}
 start() {
   ensure_secrets || { echo "nginx 未启动：密钥生成失败"; return 1; }
-  if [ -f "$DSH_ROOT/nginx/nginx.pid" ] && kill -0 "$(cat "$DSH_ROOT/nginx/nginx.pid")" 2>/dev/null; then
+  if is_up; then
     echo "nginx already running (pid $(cat "$DSH_ROOT/nginx/nginx.pid"))"; return 0
   fi
   "$NGINX" -c "$CONF" && echo "nginx started (pid $(cat "$DSH_ROOT/nginx/nginx.pid"))"
